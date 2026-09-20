@@ -11,6 +11,11 @@ from dataclasses import dataclass, field
 from xml.etree import ElementTree as ET
 
 
+def _num(value: float) -> str:
+    """Format a coordinate with 2-decimal precision, no trailing zeros."""
+    return f"{round(float(value), 2):g}"
+
+
 @dataclass
 class StrokeStyle:
     width: float = 6.0
@@ -53,7 +58,14 @@ class SvgRect:
     rx: float = 0.0
 
 
-SvgElement = SvgLine | SvgCircle | SvgEllipse | SvgRect
+@dataclass
+class SvgPolyline:
+    """A connected run of line segments. Closed runs repeat the first point."""
+
+    points: list[tuple[float, float]]
+
+
+SvgElement = SvgLine | SvgCircle | SvgEllipse | SvgRect | SvgPolyline
 
 
 @dataclass
@@ -68,10 +80,10 @@ class SvgDocument:
             "svg",
             {
                 "xmlns": "http://www.w3.org/2000/svg",
-                "viewBox": f"{min_x} {min_y} {width} {height}",
+                "viewBox": f"{_num(min_x)} {_num(min_y)} {_num(width)} {_num(height)}",
                 "fill": self.stroke_style.fill,
                 "stroke": self.stroke_style.color,
-                "stroke-width": str(self.stroke_style.width),
+                "stroke-width": _num(self.stroke_style.width),
                 "stroke-linecap": self.stroke_style.linecap,
                 "stroke-linejoin": self.stroke_style.linejoin,
             },
@@ -83,39 +95,56 @@ class SvgDocument:
                     svg,
                     "line",
                     {
-                        "x1": str(element.x1),
-                        "y1": str(element.y1),
-                        "x2": str(element.x2),
-                        "y2": str(element.y2),
+                        "x1": _num(element.x1),
+                        "y1": _num(element.y1),
+                        "x2": _num(element.x2),
+                        "y2": _num(element.y2),
                     },
                 )
             elif isinstance(element, SvgCircle):
                 ET.SubElement(
-                    svg, "circle", {"cx": str(element.cx), "cy": str(element.cy), "r": str(element.r)}
+                    svg,
+                    "circle",
+                    {"cx": _num(element.cx), "cy": _num(element.cy), "r": _num(element.r)},
                 )
             elif isinstance(element, SvgEllipse):
                 ET.SubElement(
                     svg,
                     "ellipse",
                     {
-                        "cx": str(element.cx),
-                        "cy": str(element.cy),
-                        "rx": str(element.rx),
-                        "ry": str(element.ry),
+                        "cx": _num(element.cx),
+                        "cy": _num(element.cy),
+                        "rx": _num(element.rx),
+                        "ry": _num(element.ry),
                     },
                 )
             elif isinstance(element, SvgRect):
                 attrs = {
-                    "x": str(element.x),
-                    "y": str(element.y),
-                    "width": str(element.width),
-                    "height": str(element.height),
+                    "x": _num(element.x),
+                    "y": _num(element.y),
+                    "width": _num(element.width),
+                    "height": _num(element.height),
                 }
                 if element.rx:
-                    attrs["rx"] = str(element.rx)
+                    attrs["rx"] = _num(element.rx)
                 ET.SubElement(svg, "rect", attrs)
+            elif isinstance(element, SvgPolyline):
+                points = " ".join(f"{_num(x)},{_num(y)}" for x, y in element.points)
+                ET.SubElement(svg, "polyline", {"points": points})
 
         return ET.tostring(svg, encoding="unicode")
+
+    def anchor_count(self) -> int:
+        """Total control points across all elements, for quality reporting."""
+        total = 0
+        for element in self.elements:
+            if isinstance(element, SvgLine):
+                total += 2
+            elif isinstance(element, SvgPolyline):
+                total += len(element.points)
+            else:
+                total += 1
+        return total
 
 
 def validate_svg(svg_text: str) -> list[str]:

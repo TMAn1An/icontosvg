@@ -1,6 +1,13 @@
 """Unit tests for SVG document construction and validation."""
 
-from app.services.svg_model import SvgDocument, SvgLine, StrokeStyle, validate_svg
+from app.services.svg_model import (
+    SvgCircle,
+    SvgDocument,
+    SvgLine,
+    SvgPolyline,
+    StrokeStyle,
+    validate_svg,
+)
 
 
 def test_to_xml_string_includes_stroke_attributes_not_fill():
@@ -13,8 +20,43 @@ def test_to_xml_string_includes_stroke_attributes_not_fill():
 
     assert 'fill="none"' in svg_text
     assert 'stroke="#000000"' in svg_text
-    assert 'stroke-width="6.0"' in svg_text
+    assert 'stroke-width="6"' in svg_text
+    assert 'stroke-linecap="round"' in svg_text
     assert "<line" in svg_text
+
+
+def test_coordinates_are_rounded_to_two_decimals():
+    document = SvgDocument(
+        view_box=(0, 0, 10, 10),
+        stroke_style=StrokeStyle(),
+        elements=[SvgLine(x1=1.234567, y1=2.0, x2=3.0, y2=4.0)],
+    )
+    assert 'x1="1.23"' in document.to_xml_string()
+
+
+def test_polyline_is_emitted_with_point_pairs():
+    document = SvgDocument(
+        view_box=(0, 0, 10, 10),
+        stroke_style=StrokeStyle(),
+        elements=[SvgPolyline(points=[(0.0, 0.0), (5.0, 1.0), (10.0, 0.0)])],
+    )
+    svg_text = document.to_xml_string()
+
+    assert '<polyline points="0,0 5,1 10,0"' in svg_text
+    assert validate_svg(svg_text) == []
+
+
+def test_anchor_count_sums_across_element_types():
+    document = SvgDocument(
+        view_box=(0, 0, 10, 10),
+        stroke_style=StrokeStyle(),
+        elements=[
+            SvgLine(x1=0, y1=0, x2=1, y2=1),
+            SvgPolyline(points=[(0.0, 0.0), (1.0, 1.0), (2.0, 0.0)]),
+            SvgCircle(cx=5, cy=5, r=2),
+        ],
+    )
+    assert document.anchor_count() == 6
 
 
 def test_validate_svg_accepts_well_formed_document():
