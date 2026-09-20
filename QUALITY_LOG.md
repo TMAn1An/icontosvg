@@ -13,6 +13,14 @@ threshold 128. A 5x10 grid of 50 line icons.
 
 ## 2026-09-20 — Phase 1 slice, geometry regularization
 
+**Commit:** `a510ccd` (regularization work); checkpointed with
+documentation at `569e804`. Branch `claude/happy-carson-lh8mr7`.
+
+**Icons tested:** crop-31 (monitor + bars), crop-2 (credit card), crop-35
+(presentation board), crop-21 (coin + dollar sign + bars) sampled in
+detail; all 50 crops on `fixtures/real/finance-icon-sheet.jpg` measured
+in aggregate.
+
 **Suite:** 45 tests, all passing (Python 3.11.15, PySide6 6.11.2).
 
 ### Segmentation
@@ -162,6 +170,15 @@ Ranked by visual impact.
 ---
 
 ## 2026-09-20 — curve-versus-corner classification
+
+**Commit:** `f2b3f64`. Branch `claude/happy-carson-lh8mr7`.
+
+**Icons tested:** the same four sampled icons (crop-31, crop-2, crop-35,
+crop-21) plus all 50 crops on `fixtures/real/finance-icon-sheet.jpg` in
+aggregate; six synthetic fixture families (sharp triangle, rounded
+rectangle, semicircle, S-curve, line-to-arc transition) each in crisp and
+blurred+JPEG-recompressed variants, plus the real dollar-sign crop
+(crop-21) directly.
 
 **Suite:** 79 tests, all passing (34 new curve-classification tests, each
 shape fixture in crisp and blurred+JPEG-recompressed variants).

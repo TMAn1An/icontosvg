@@ -4,6 +4,17 @@ All notable changes to Icon Sheet Studio. Dates are ISO 8601.
 
 ## [Unreleased]
 
+Documentation audit (this update): rewrote `PROJECT_MEMORY.md` against a
+27-point completeness checklist, added `DECISIONS.md`, expanded
+`RUNBOOK.md` with complete Windows PowerShell and Linux/macOS
+instructions for every operational task, added a documentation-update
+rule to `CLAUDE.md`. No code changes.
+
+## [0.2.0] — 2026-09-20
+
+Curve-versus-corner classification. Commit `f2b3f64` on branch
+`claude/happy-carson-lh8mr7`.
+
 ### Added — curve-versus-corner classification
 
 - `services/geometry/curve_fit.py`: neighborhood-based corner proposal,
