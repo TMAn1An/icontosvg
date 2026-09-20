@@ -1,23 +1,27 @@
-"""Line-icon reconstruction: centerline -> stroked SVG primitives.
+"""Line-icon reconstruction: topology first, geometry second.
 
-Emits true SVG strokes (fill="none", explicit stroke-width/cap/join) built
-only from the extracted centerline — never from raw edge contours — so
-blurry outer edges are never traced into a filled shape.
+Processing order, and why it is this order:
 
-Stage order, and why:
+1. Build and clean the skeleton graph (`geometry/topology.py`).
+2. Identify components, endpoints, junctions and closed loops.
+3. Pair branches at each junction by tangent continuity, *before* any
+   fitting, so a stroke that passes through a crossing is reassembled
+   whole. This is what keeps the dollar sign's vertical stroke and its
+   S-curve as two continuous strokes instead of four unrelated arcs.
+4. Classify each whole stroke, never a fragment.
+5. Generate competing primitive candidates for it.
+6. Accept a replacement only if it preserves topology and clearly
+   improves the fit (`geometry/candidates.evaluate_gate`).
+7. Otherwise keep the baseline straight/polyline reconstruction.
 
-1. `curve_fit.fit_branch` classifies each branch's ordered samples into
-   straight sections, sharp corners, circular arcs and cubic Beziers. This
-   happens *before* any simplification, so curvature is never discarded by
-   a straight-only model.
-2. Only the sections classified straight are handed to
-   `regularize`'s icon-wide axis alignment. Curves are never snapped.
-3. `curve_fit.resolve_joints` closes each joint, keeping sharp corners
-   sharp and matching tangents where the source is smooth.
-4. Emission picks the narrowest representation: <line>/<polyline> for a
-   purely straight branch, <circle> for a full circular loop, <rect> for
-   an axis-aligned rectangular loop, and a single <path> mixing L/A/C
-   commands whenever one branch needs more than one kind of section.
+Only baseline (straight) geometry is handed to the icon-wide axis
+alignment; curves are never snapped. Degenerate and duplicate elements
+are removed before emission.
+
+An earlier per-branch curve classifier is preserved for reference at tag
+`failed-experiment/curve-classification-v1`; it fitted fragments without
+a graph and produced zero-length elements, split glyphs, and open paths
+wrongly closed with `Z`.
 """
 
 from __future__ import annotations
@@ -26,23 +30,29 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from app.services.geometry.candidates import (
+    Candidate,
+    arc_candidate,
+    composite_candidate,
+    corner_polyline_candidate,
+    baseline_candidate,
+    bezier_chain_candidate,
+    circle_candidate,
+    deduplicate,
+    ellipse_candidate,
+    evaluate_gate,
+    polygon_candidate,
+    sharp_corner_indices,
+    sharp_corner_points,
+    rounded_rect_candidate,
+    straight_candidate,
+)
 from app.services.geometry.centerline import (
     binarize_for_skeleton,
     estimate_stroke_width,
     extract_skeleton,
-    is_closed,
-    prune_spurs,
-    trace_branches,
 )
-from app.services.geometry.curve_fit import (
-    ArcModel,
-    BezierModel,
-    BranchFit,
-    LineModel,
-    fit_branch,
-    resolve_joints,
-)
-from app.services.geometry.primitives import is_axis_aligned_rectangle
+from app.services.geometry.curve_fit import detect_corners, tangent_turning
 from app.services.geometry.regularize import (
     FittedLine,
     RegularizationStats,
@@ -51,36 +61,46 @@ from app.services.geometry.regularize import (
     estimate_dominant_axes,
     snap_sections,
 )
+from app.services.geometry.topology import (
+    SkeletonGraph,
+    assemble_strokes,
+    build_graph,
+    pair_at_junctions,
+    prune_graph_spurs,
+    topology_signature,
+)
 from app.services.reconstruction.base import ReconstructionStrategy
 from app.services.svg_model import (
-    PathArcTo,
-    PathCubicTo,
-    PathLineTo,
-    PathMoveTo,
-    SvgCircle,
     SvgDocument,
     SvgLine,
-    SvgPath,
     SvgPolyline,
-    SvgRect,
     StrokeStyle,
 )
 
 
 @dataclass
-class LineModeDiagnostics:
-    """Intermediate measurements, surfaced to the Quality tab."""
+class StrokeDecision:
+    stroke_index: int
+    chosen: str
+    baseline_error: float
+    chosen_error: float
+    confidence: float
+    rejected: list[tuple[str, str]] = field(default_factory=list)
+    needs_review: bool = False
 
+
+@dataclass
+class LineModeDiagnostics:
     stroke_width: float
     stroke_widths: np.ndarray
-    branch_count_raw: int
-    branch_count_after_pruning: int
+    topology: dict[str, int]
+    stroke_count: int
+    junction_pairings: int
     element_counts: dict[str, int]
     regularization: RegularizationStats
-    section_counts: dict[str, int] = field(default_factory=dict)
-    corner_count: int = 0
-    joint_discontinuities: list[float] = field(default_factory=list)
-    fit_errors: dict[str, list[float]] = field(default_factory=dict)
+    decisions: list[StrokeDecision] = field(default_factory=list)
+    removed_degenerate: int = 0
+    needs_review_count: int = 0
 
 
 class LineModeStrategy(ReconstructionStrategy):
@@ -89,308 +109,398 @@ class LineModeStrategy(ReconstructionStrategy):
         ink_threshold: int = 200,
         angle_tolerance_degrees: float = 4.0,
         fit_tolerance: float | None = None,
-        corner_threshold_degrees: float = 38.0,
     ) -> None:
         self._ink_threshold = ink_threshold
         self._angle_tolerance_degrees = angle_tolerance_degrees
         self._fit_tolerance = fit_tolerance
-        self._corner_threshold_degrees = corner_threshold_degrees
         self.diagnostics: LineModeDiagnostics | None = None
+
+    # -- main -----------------------------------------------------------
 
     def reconstruct(self, crop_grayscale: np.ndarray) -> SvgDocument:
         height, width = crop_grayscale.shape
         binary = binarize_for_skeleton(crop_grayscale, self._ink_threshold)
         skeleton = extract_skeleton(binary)
         stroke_width, stroke_widths = estimate_stroke_width(binary, skeleton)
+        stroke_width = stroke_width if stroke_width > 0 else 1.0
 
-        raw_branches = trace_branches(skeleton)
-        branches = prune_spurs(raw_branches, skeleton, stroke_width)
+        # 1-2. graph, cleaned of cap/corner stubs.
+        graph = self._cleaned_graph(skeleton, stroke_width)
+        signature = topology_signature(graph)
 
-        fits = [
-            fit_branch(
-                branch,
-                closed=is_closed(branch),
-                stroke_width=stroke_width,
-                tolerance=self._fit_tolerance,
-                corner_threshold_degrees=self._corner_threshold_degrees,
-            )
-            for branch in branches
-        ]
+        # 3. pair branches at junctions before fitting anything.
+        pairing = pair_at_junctions(graph)
+        strokes = assemble_strokes(graph, pairing)
 
-        regularization = self._align_straight_sections(fits, stroke_width)
-
-        discontinuities: list[float] = []
-        for branch_fit in fits:
-            discontinuities.extend(
-                resolve_joints(branch_fit, max_shift=max(2.0, stroke_width * 2.0))
-            )
-
-        # Loose ends are aligned after the joints are closed, so that
-        # pulling a bar's foot onto a shared baseline cannot disturb the
-        # corner at its other end.
-        self._align_free_endpoints(
-            fits, max(1.0, stroke_width * 0.6), regularization
-        )
+        tolerance = self._fit_tolerance or max(0.6, stroke_width * 0.3)
+        epsilon = max(0.75, stroke_width * 0.35)
+        window = max(2, int(round(max(2.0, stroke_width) * 0.75)))
 
         document = SvgDocument(
             view_box=(0, 0, float(width), float(height)),
             stroke_style=StrokeStyle(
-                width=round(stroke_width, 2) if stroke_width > 0 else 1.0,
-                color="#000000",
-                linecap="round",
-                linejoin="round",
+                width=round(stroke_width, 2), color="#000000",
+                linecap="round", linejoin="round",
             ),
         )
 
-        counts = {"circle": 0, "rect": 0, "line": 0, "polyline": 0, "path": 0}
-        section_counts: dict[str, int] = {}
-        fit_errors: dict[str, list[float]] = {"line": [], "arc": [], "bezier": []}
-        corner_count = 0
+        decisions: list[StrokeDecision] = []
+        straight_elements: list[SvgLine | SvgPolyline] = []
+        curve_elements: list = []
+        counts: dict[str, int] = {}
 
-        for branch_fit in fits:
-            if not branch_fit.sections:
+        for index, stroke in enumerate(strokes):
+            samples = stroke.samples
+            if len(samples) < 2:
                 continue
-            corner_count += branch_fit.corner_count
-            for section in branch_fit.sections:
-                kind = section.model.kind
-                section_counts[kind] = section_counts.get(kind, 0) + 1
-                fit_errors[kind].append(section.model.max_error)
 
-            kind = self._emit(document, branch_fit)
-            if kind is not None:
-                counts[kind] += 1
+            baseline = self._baseline_for(samples, stroke.closed, epsilon, tolerance)
+
+            # "Do not apply curve fitting to straight components": if a
+            # straight line already describes the stroke, nothing may
+            # replace it, however closely a cubic could chase the pixels.
+            if baseline.kind == "line" and baseline.max_error <= tolerance:
+                candidates = []
+            else:
+                candidates = self._candidates_for(
+                    samples, stroke.closed, stroke_width, tolerance, window
+                )
+
+            decision = StrokeDecision(
+                stroke_index=index, chosen=baseline.kind,
+                baseline_error=baseline.max_error,
+                chosen_error=baseline.max_error, confidence=1.0,
+            )
+            chosen = baseline
+
+            preferred = self._preferred_kind(
+                samples, window, stroke.closed, tolerance
+            )
+            corners = sharp_corner_points(samples, window, stroke.closed)
+            passing: list[tuple[Candidate, float]] = []
+            for candidate in candidates:
+                gate = evaluate_gate(
+                    candidate, baseline, samples, stroke.closed, stroke_width,
+                    preferred=(candidate.kind == preferred),
+                    corners=corners,
+                )
+                if gate.accepted:
+                    passing.append((candidate, gate.confidence))
+                else:
+                    decision.rejected.append((candidate.kind, "; ".join(gate.reasons)))
+
+            if passing:
+                # Simplest adequate model: among candidates that fit within
+                # tolerance, the fewest parameters wins. Sorting by error
+                # alone would hand a clean semicircle to an eleven-segment
+                # Bezier chain simply because it can chase the pixels
+                # closer than a three-parameter arc.
+                # The structurally-called-for candidate counts as adequate
+                # on the same reasoning the gate uses for it: blur bows a
+                # straight run by a pixel, and judging a polygonal chain
+                # or a sharp polygon on raw error alone hands the shape to
+                # whichever curve can chase that wobble closest.
+                adequate = [
+                    p for p in passing
+                    if p[0].max_error <= tolerance or p[0].kind == preferred
+                ]
+                if adequate:
+                    adequate.sort(key=lambda pair: (
+                        pair[0].kind != preferred,
+                        pair[0].complexity,
+                        round(pair[0].max_error, 3),
+                    ))
+                    chosen, confidence = adequate[0]
+                else:
+                    passing.sort(key=lambda pair: (round(pair[0].max_error, 3),
+                                                   pair[0].complexity))
+                    chosen, confidence = passing[0]
+                decision.chosen = chosen.kind
+                decision.chosen_error = chosen.max_error
+                decision.confidence = confidence
+            elif candidates:
+                # Every curve candidate was refused: keep the safe result and
+                # flag it, rather than shipping a guess.
+                decision.needs_review = baseline.max_error > tolerance * 2
+                decision.confidence = 0.0
+
+            decisions.append(decision)
+            counts[chosen.kind] = counts.get(chosen.kind, 0) + 1
+
+            if chosen is baseline and chosen.kind in ("line", "polyline"):
+                straight_elements.extend(chosen.elements)
+            else:
+                curve_elements.extend(chosen.elements)
+
+        # 7-adjacent: axis alignment applies only to straight output.
+        regularization = self._align_straight(straight_elements, stroke_width)
+
+        all_elements = straight_elements + curve_elements
+        cleaned = deduplicate(all_elements)
+        removed = len(all_elements) - len(cleaned)
+        document.elements.extend(cleaned)
 
         self.diagnostics = LineModeDiagnostics(
             stroke_width=stroke_width,
             stroke_widths=stroke_widths,
-            branch_count_raw=len(raw_branches),
-            branch_count_after_pruning=len(branches),
+            topology=signature,
+            stroke_count=len(strokes),
+            junction_pairings=len(pairing) // 2,
             element_counts=counts,
             regularization=regularization,
-            section_counts=section_counts,
-            corner_count=corner_count,
-            joint_discontinuities=discontinuities,
-            fit_errors=fit_errors,
+            decisions=decisions,
+            removed_degenerate=removed,
+            needs_review_count=sum(1 for d in decisions if d.needs_review),
         )
         return document
 
-    # -- axis alignment, straights only ---------------------------------
-
-    def _align_straight_sections(
-        self, fits: list[BranchFit], stroke_width: float
-    ) -> RegularizationStats:
-        """Run the icon-wide axis passes over the straight sections only.
-
-        Arcs and Beziers are not represented here at all, so no amount of
-        axis alignment can touch a curve.
-        """
-        stats = RegularizationStats()
-        pairs: list[tuple[LineModel, FittedLine]] = []
-        for branch_fit in fits:
-            for section in branch_fit.sections:
-                model = section.model
-                if not isinstance(model, LineModel):
-                    continue
-                pairs.append(
-                    (
-                        model,
-                        FittedLine(
-                            point=np.asarray(model.point, dtype=float),
-                            direction=np.asarray(model.direction, dtype=float),
-                            start=np.asarray(model.start, dtype=float),
-                            end=np.asarray(model.end, dtype=float),
-                            pixel_count=0,
-                        ),
-                    )
-                )
-
-        sections = [line for _, line in pairs]
-        stats.sections_total = len(sections)
-        if not sections:
-            return stats
-
-        horizontal_angle, vertical_angle = estimate_dominant_axes(
-            sections, self._angle_tolerance_degrees
-        )
-        stats.horizontal_angle = horizontal_angle
-        stats.vertical_angle = vertical_angle
-        classify_sections(
-            sections, horizontal_angle, vertical_angle, self._angle_tolerance_degrees
-        )
-
-        # Every entry here is already a straight section, so there is no
-        # corner to protect and no minimum length to enforce.
-        snap_sections(
-            sections,
-            horizontal_angle,
-            vertical_angle,
-            min_length=0.0,
-            is_standalone=True,
-            stats=stats,
-        )
-        align_offsets(sections, max(1.0, stroke_width * 0.6), stats)
-
-        for model, line in pairs:
-            model.point = line.point
-            model.direction = line.direction
-            model.snapped = line.snapped
-            model.orientation = line.orientation
-            # Keep the drawn extent on the corrected line.
-            model.start = line.project(model.start)
-            model.end = line.project(model.end)
-
-        return stats
+    # -- stages ---------------------------------------------------------
 
     @staticmethod
-    def _align_free_endpoints(
-        fits: list[BranchFit], tolerance: float, stats: RegularizationStats
-    ) -> None:
-        """Pull loose ends of axis-aligned straights onto a shared level.
+    def _cleaned_graph(skeleton: np.ndarray, stroke_width: float) -> SkeletonGraph:
+        """Graph built from the skeleton after spur pruning.
 
-        A bar standing on a baseline ends at the same coordinate in the
-        source art; skeletonization leaves those ends a pixel or two
-        apart. Only ends belonging to a snapped straight qualify, and only
-        within `tolerance`, so this expresses an alignment the raster
-        already shows rather than inventing one.
+        Pruning runs on traced branches first so cap/corner stubs never
+        become graph nodes and split a stroke at a phantom junction.
         """
-        Candidate = tuple[LineModel, str, int]
-        candidates: list[Candidate] = []
-        for branch_fit in fits:
-            if branch_fit.closed or not branch_fit.sections:
-                continue
-            for model, which in (
-                (branch_fit.sections[0].model, "start"),
-                (branch_fit.sections[-1].model, "end"),
+        graph = build_graph(skeleton)
+        return prune_graph_spurs(graph, max_length=max(3.0, stroke_width * 1.5))
+
+    def _baseline_for(self, samples: np.ndarray, closed: bool,
+                      epsilon: float, tolerance: float) -> Candidate:
+        """Safe fallback: a straight line when the stroke is straight,
+        otherwise the RDP polyline."""
+        if not closed:
+            straight = straight_candidate(samples)
+            if straight is not None and straight.max_error <= tolerance:
+                return straight
+        return baseline_candidate(samples, closed, epsilon)
+
+    @staticmethod
+    def _preferred_kind(samples: np.ndarray, window: int, closed: bool,
+                        tolerance: float) -> str | None:
+        """Which representation the stroke's own character calls for.
+
+        A path whose curvature changes sign cannot be described by arcs:
+        an arc has one centre. Such a stroke wants cubics even when a
+        chain of arcs happens to fit.
+
+        A stroke a straight line already fits never gets a curve
+        preference, whatever the turning profile says — noise on a short
+        dash otherwise fakes an inflection and turns it into a cubic.
+        """
+        from app.services.geometry.candidates import _curvature_sign_splits
+
+        if closed:
+            # A closed outline that a three-corner polygon can describe is
+            # an arrowhead or triangle and must stay sharp. Asking the
+            # polygon fitter directly is more reliable than counting
+            # corners on a cycle, where the seam can sit on a corner and
+            # hide it.
+            from app.services.geometry.candidates import polygon_candidate
+
+            triangle = polygon_candidate(samples, 3, 0.0)
+            if triangle is not None and triangle.max_error <= tolerance * 3.0:
+                return "polygon"
+            return None
+
+        straight = straight_candidate(samples)
+        if straight is not None and straight.max_error <= tolerance:
+            return None
+
+        # Straight runs meeting at sharp corners outrank any curve: if
+        # every run between the raster's own corners is straight, the
+        # stroke is a polygonal chain, not a wave that happens to fit.
+        chain = corner_polyline_candidate(
+            samples, sharp_corner_indices(samples, window, closed),
+            closed, tolerance,
+        )
+        if chain is not None:
+            return "corner-polyline"
+
+        if _curvature_sign_splits(samples, window):
+            return "bezier"
+        return None
+
+    def _candidates_for(self, samples: np.ndarray, closed: bool,
+                        stroke_width: float, tolerance: float,
+                        window: int) -> list[Candidate]:
+        """Competing primitives, chosen by the stroke's own character."""
+        out: list[Candidate] = []
+        min_radius = max(1.0, stroke_width * 0.6)
+        min_sagitta = max(0.8, stroke_width * 0.4)
+        turning = tangent_turning(samples, window)
+        median_turn = float(np.median(turning)) if turning.size else 0.0
+
+        if closed:
+            for maker in (
+                lambda: circle_candidate(samples, min_radius),
+                lambda: ellipse_candidate(samples),
+                lambda: rounded_rect_candidate(samples, stroke_width),
             ):
-                if not isinstance(model, LineModel) or not model.snapped:
-                    continue
-                axis = 1 if model.orientation == "vertical" else 0
-                candidates.append((model, which, axis))
+                candidate = maker()
+                if candidate is not None:
+                    out.append(candidate)
+
+            corners = detect_corners(samples, window)
+            # A three-corner closed component is an arrowhead: keep it sharp.
+            for expected in (len(corners) if corners else None, 3):
+                candidate = polygon_candidate(samples, expected, stroke_width)
+                if candidate is not None:
+                    out.append(candidate)
+                    break
+            return out
+
+        # Open strokes: straight, then constant-curvature, then changing.
+        straight = straight_candidate(samples)
+        if straight is not None:
+            out.append(straight)
+
+        # A chain of straight runs meeting at real corners. Offered
+        # before the curve candidates because a zigzag is not a curve.
+        corner_indices = sharp_corner_indices(samples, window, closed)
+        chain = corner_polyline_candidate(
+            samples, corner_indices, closed, tolerance
+        )
+        if chain is not None:
+            out.append(chain)
+
+        # Curve candidates are always offered; the gate and the
+        # simplest-adequate rule decide, not a turning heuristic that
+        # silently skipped shallow waves.
+        arc = arc_candidate(samples, min_radius, min_sagitta)
+        if arc is not None:
+            out.append(arc)
+        bezier = bezier_chain_candidate(samples, window, tolerance * 0.8)
+        if bezier is not None:
+            out.append(bezier)
+
+        composite = composite_candidate(
+            samples, stroke_width, tolerance, window,
+            corner_indices=corner_indices,
+        )
+        if composite is not None:
+            out.append(composite)
+        return out
+
+    @staticmethod
+    def _align_free_ends(pairs: list, tolerance: float,
+                         stats: RegularizationStats) -> None:
+        """Pull loose ends of snapped straights onto a shared level.
+
+        Bars standing on a common baseline end at the same coordinate in
+        the source art; skeletonization leaves those ends a pixel or two
+        apart.
+        """
+        candidates: list[tuple[FittedLine, str, int]] = []
+        for _element, _kind, _seg, line in pairs:
+            if not line.snapped:
+                continue
+            axis = 1 if line.orientation == "vertical" else 0
+            candidates.append((line, "start", axis))
+            candidates.append((line, "end", axis))
 
         for axis in (0, 1):
             group = [c for c in candidates if c[2] == axis]
             if len(group) < 2:
                 continue
 
-            def coordinate(candidate: Candidate) -> float:
-                model, which, _ = candidate
-                point = model.start if which == "start" else model.end
-                return float(point[axis])
+            def coord(item) -> float:
+                line, which, _ = item
+                return float((line.start if which == "start" else line.end)[axis])
 
-            group.sort(key=coordinate)
-            clusters: list[list[Candidate]] = []
+            group.sort(key=coord)
+            clusters: list[list] = []
             cluster = [group[0]]
-            for candidate in group[1:]:
-                if coordinate(candidate) - coordinate(cluster[-1]) <= tolerance:
-                    cluster.append(candidate)
+            for item in group[1:]:
+                if coord(item) - coord(cluster[-1]) <= tolerance:
+                    cluster.append(item)
                 else:
                     clusters.append(cluster)
-                    cluster = [candidate]
+                    cluster = [item]
             clusters.append(cluster)
 
             for members in clusters:
+                # A segment shorter than the tolerance has both of its own
+                # ends in one cluster; snapping them to a shared coordinate
+                # would collapse it to zero length. The short dashes of a
+                # dashed rule are exactly this case, and two of them used
+                # to disappear from the credit-card icon.
+                owners = [id(line) for line, _which, _axis in members]
+                collapsing = {owner for owner in owners if owners.count(owner) > 1}
+                if collapsing:
+                    members = [
+                        m for m in members if id(m[0]) not in collapsing
+                    ]
                 if len(members) < 2:
                     continue
-                target = float(np.mean([coordinate(member) for member in members]))
-                for model, which, _ in members:
-                    point = model.start if which == "start" else model.end
-                    step = model.direction[axis]
+                target = float(np.mean([coord(m) for m in members]))
+                for line, which, _ in members:
+                    point = line.start if which == "start" else line.end
+                    step = line.direction[axis]
                     if abs(step) < 1e-9:
                         continue
-                    moved = point + ((target - point[axis]) / step) * model.direction
+                    moved = point + ((target - point[axis]) / step) * line.direction
                     if which == "start":
-                        model.start = moved
+                        line.start = moved
                     else:
-                        model.end = moved
+                        line.end = moved
                     stats.endpoints_aligned += 1
 
-    # -- emission --------------------------------------------------------
+    def _align_straight(self, elements: list, stroke_width: float) -> RegularizationStats:
+        """Icon-wide axis alignment over straight geometry only."""
+        stats = RegularizationStats()
+        pairs: list[tuple[object, str, int, FittedLine]] = []
 
-    def _emit(self, document: SvgDocument, branch_fit: BranchFit) -> str | None:
-        sections = branch_fit.sections
-        models = [section.model for section in sections]
+        for element in elements:
+            if isinstance(element, SvgLine):
+                segments = [((element.x1, element.y1), (element.x2, element.y2))]
+            elif isinstance(element, SvgPolyline):
+                segments = list(zip(element.points, element.points[1:]))
+            else:
+                continue
+            for seg_index, (a, b) in enumerate(segments):
+                start = np.array(a, dtype=float)
+                end = np.array(b, dtype=float)
+                direction = end - start
+                if float(np.linalg.norm(direction)) < 1e-9:
+                    continue
+                unit = direction / float(np.linalg.norm(direction))
+                pairs.append((
+                    element,
+                    "line" if isinstance(element, SvgLine) else "polyline",
+                    seg_index,
+                    FittedLine(point=(start + end) / 2, direction=unit,
+                               start=start, end=end, pixel_count=0),
+                ))
 
-        if len(models) == 1 and isinstance(models[0], ArcModel) and branch_fit.closed:
-            arc = models[0]
-            if arc.sweep_degrees >= 330.0:
-                document.elements.append(
-                    SvgCircle(
-                        cx=float(arc.center[0]),
-                        cy=float(arc.center[1]),
-                        r=float(arc.radius),
-                    )
-                )
-                return "circle"
+        sections = [p[3] for p in pairs]
+        stats.sections_total = len(sections)
+        if not sections:
+            return stats
 
-        if all(isinstance(model, LineModel) for model in models):
-            vertices = [np.asarray(models[0].start, dtype=float)]
-            vertices.extend(np.asarray(model.end, dtype=float) for model in models)
-            if branch_fit.closed and len(vertices) > 2:
-                vertices[-1] = vertices[0]
+        horizontal, vertical = estimate_dominant_axes(
+            sections, self._angle_tolerance_degrees
+        )
+        stats.horizontal_angle = horizontal
+        stats.vertical_angle = vertical
+        classify_sections(sections, horizontal, vertical, self._angle_tolerance_degrees)
+        snap_sections(sections, horizontal, vertical, min_length=0.0,
+                      is_standalone=True, stats=stats)
+        align_offsets(sections, max(1.0, stroke_width * 0.6), stats)
+        self._align_free_ends(pairs, max(1.0, stroke_width * 0.6), stats)
 
-            if branch_fit.closed and is_axis_aligned_rectangle(
-                np.unique(np.vstack(vertices), axis=0)
-            ):
-                stacked = np.vstack(vertices)
-                min_x, min_y = stacked.min(axis=0)
-                max_x, max_y = stacked.max(axis=0)
-                document.elements.append(
-                    SvgRect(
-                        x=float(min_x),
-                        y=float(min_y),
-                        width=float(max_x - min_x),
-                        height=float(max_y - min_y),
-                    )
-                )
-                return "rect"
+        # Write the corrected geometry back, keeping each element's shape.
+        for element, kind, seg_index, line in pairs:
+            new_start = line.project(line.start)
+            new_end = line.project(line.end)
+            if kind == "line":
+                element.x1, element.y1 = float(new_start[0]), float(new_start[1])
+                element.x2, element.y2 = float(new_end[0]), float(new_end[1])
+            else:
+                points = list(element.points)
+                points[seg_index] = (float(new_start[0]), float(new_start[1]))
+                points[seg_index + 1] = (float(new_end[0]), float(new_end[1]))
+                element.points = points
 
-            if len(vertices) == 2:
-                document.elements.append(
-                    SvgLine(
-                        x1=float(vertices[0][0]),
-                        y1=float(vertices[0][1]),
-                        x2=float(vertices[1][0]),
-                        y2=float(vertices[1][1]),
-                    )
-                )
-                return "line"
-
-            document.elements.append(
-                SvgPolyline(points=[(float(v[0]), float(v[1])) for v in vertices])
-            )
-            return "polyline"
-
-        commands = [
-            PathMoveTo(x=float(models[0].start[0]), y=float(models[0].start[1]))
-        ]
-        for model in models:
-            if isinstance(model, LineModel):
-                commands.append(PathLineTo(x=float(model.end[0]), y=float(model.end[1])))
-            elif isinstance(model, ArcModel):
-                commands.append(
-                    PathArcTo(
-                        rx=float(model.radius),
-                        ry=float(model.radius),
-                        large_arc=model.sweep_degrees > 180.0,
-                        # SVG sweeps in the direction of increasing angle,
-                        # which in image coordinates is the non-clockwise
-                        # flag from the fit.
-                        sweep=not model.clockwise,
-                        x=float(model.end[0]),
-                        y=float(model.end[1]),
-                    )
-                )
-            elif isinstance(model, BezierModel):
-                commands.append(
-                    PathCubicTo(
-                        x1=float(model.p1[0]),
-                        y1=float(model.p1[1]),
-                        x2=float(model.p2[0]),
-                        y2=float(model.p2[1]),
-                        x=float(model.p3[0]),
-                        y=float(model.p3[1]),
-                    )
-                )
-
-        document.elements.append(SvgPath(commands=commands, closed=branch_fit.closed))
-        return "path"
+        return stats

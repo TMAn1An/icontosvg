@@ -464,6 +464,84 @@ centerline length was genuinely curved and had nowhere to go). After:
 model (line mean 0.26px, arc mean 0.67px, cubic mean 0.75px). Full tables
 in `QUALITY_LOG.md`.
 
+### 13a. Topology-first reconstruction (current pipeline, supersedes 13)
+
+The per-branch classifier described in section 13 was **rejected as a
+quality regression** (see section 22 and `QUALITY_LOG.md`). It fitted
+skeleton *fragments* without a graph, so a glyph split at its crossings
+could never come back as continuous strokes. It is preserved at tag
+`failed-experiment/curve-classification-v1` (commit `f2b3f64`) and was
+never merged to `main`. `curve_fit.py` survives as the low-level fitting
+library it always was — `fit_line`, `fit_arc`, `fit_cubic_bezier`,
+`detect_corners`, `tangent_turning` — and is called by the new pipeline;
+what was removed is its per-branch decomposition path as the arbiter.
+
+The current pipeline lives in `services/geometry/topology.py`,
+`services/geometry/candidates.py` and
+`services/reconstruction/line_mode.py`, and runs in this fixed order:
+
+1. **Build the skeleton graph** (`topology.build_graph`). Node degree is
+   the **Rutovitz crossing number** — the count of 0→1 transitions
+   around the ordered 8-neighbour ring. Clustering the neighbours by
+   8-adjacency instead (the obvious approach, and the one this replaced)
+   reports the centre of a `+` as degree 1, because its four arm pixels
+   are mutually diagonally adjacent and collapse into one cluster. That
+   single bug is why the old pipeline saw `junctions: 0` on the dollar
+   sign and split it into fragments.
+2. **Clean the graph** (`prune_graph_spurs`). Spur removal and degree-2
+   healing run together to a joint fixed point, so a micro-loop created
+   by healing is itself removed on the next pass.
+3. **Pair branches at junctions by tangent continuity**
+   (`pair_at_junctions`), *before* any fitting. Greedy pairing of the
+   most nearly opposite tangents, with a minimum continuation angle of
+   115°.
+4. **Assemble strokes** (`assemble_strokes`) by chaining edges through
+   those pairings. Only whole strokes are ever classified.
+5. **Generate competing candidates** for each whole stroke
+   (`candidates.py`): straight, corner-polyline, circle, ellipse,
+   rounded rect, polygon, arc, cubic chain, composite (greedy
+   longest-prefix line/arc segmentation), plus the RDP polyline
+   baseline, which is always safe.
+6. **Gate every candidate** (`candidates.evaluate_gate`). Each check is a
+   veto: closure must match, no degenerate element, displacement within
+   one stroke width, a clear improvement over the baseline unless the
+   candidate is the structurally preferred one, endpoint coverage kept,
+   no straying outside the traced ink, **no corner of the raster
+   rounded off** (both a distance test and a tangent-retention test —
+   see below).
+7. **Choose the simplest adequate model**, then axis-align *straight*
+   output only. Curves are never snapped. Degenerate and duplicate
+   elements are dropped before emission.
+
+**Corner preservation** (`sharp_corner_indices` / `sharp_corner_points`
+/ `_turn_at` in `candidates.py`) is a two-part veto:
+
+- *Distance*: every corner the raster shows must lie within
+  `0.6 x stroke width` of the candidate outline.
+- *Tangent retention*: at each corner turning ≥ 35°, the turn measured
+  on the candidate over a fixed arc-length span (`1.5 x stroke width`)
+  must be at least half the turn measured the same way on the pixels.
+  Distance alone is not enough — a cubic can thread a zigzag's peak
+  within a pixel and still arrive smooth.
+
+The same corner indices bound each piece inside `composite_candidate`,
+so an arc can run up to a corner but never through it. Without that, an
+arc happily spanned a bar chart's flat top and both of its corners and
+replaced the top edge with a dome.
+
+**`corner-polyline`** is a candidate of its own: straight runs fitted
+between consecutive detected corners and met at their intersections. It
+is offered and *preferred* whenever every run is straight within
+`1.5 x tolerance`, because a zigzag is not a curve. This is what keeps
+the chart arrow in crop-35 sharp.
+
+**Measured on the real 50-icon sheet** (all 50 crops, current pipeline):
+743 strokes assembled through 605 junction pairings; element mix 426
+`line`, 104 `polyline`, 89 `bezier`, 38 `corner-polyline`, 27 `circle`,
+23 `composite`, 18 `arc`, 17 `rounded-rect`, 1 `polygon`; 2,642 anchors
+total; **0 degenerate elements removed, 0 strokes flagged for review, 0
+invalid SVG documents**. Per-icon findings are in `QUALITY_LOG.md`.
+
 ## 14. SVG construction rules
 
 `services/svg_model.py`:
@@ -545,9 +623,13 @@ and direct visual comparison in two independent renderers.
 
 ## 17. Testing strategy and current test count
 
-**79 tests total** (Python 3.11.15, PySide6 6.11.2, `pytest-qt` 4.5.0),
-all passing on `f2b3f64`. Requires `QT_QPA_PLATFORM=offscreen` even for
-non-UI tests, since `domain/commands.py` builds on `QUndoCommand`.
+**108 tests (103 passing, 5 skipped)** as of the topology-first rewrite
+(Python 3.11.15, PySide6 6.11.2, `pytest-qt` 4.5.0). Requires
+`QT_QPA_PLATFORM=offscreen` even for non-UI tests, since
+`domain/commands.py` builds on `QUndoCommand`.
+
+The count above supersedes the 79 recorded on `f2b3f64`; that figure is
+kept here because the table below still describes those files.
 
 | file | tests | covers |
 |---|---|---|
@@ -559,6 +641,13 @@ non-UI tests, since `domain/commands.py` builds on `QUndoCommand`.
 | `test_segmentation.py` | 6 | multi-part merge, speckle rejection, reading order, padding-once, edge flag |
 | `test_regularize.py` | 18 | tilt snapping, parallelism, shared baselines, diagonal preservation, curve non-snapping, rounded-corner survival |
 | `test_curve_fit.py` | 34 | corner/arc/cubic classification on 6 fixture families x crisp/blurred variants, plus unit tests for turning, corner detection, model selection, Bézier/line fitting |
+| `test_topology_reconstruction.py` | 29 | the ten mandated regression cases: crossing dollar strokes, seven dashes, capsule, sharp arrowhead (x3 blur levels), rounded rect, circle containing a symbol, straight board edges, S-curve, near-closed open curve, and no zero-length element or segment across all eight fixtures |
+
+Five tests in `test_curve_fit.py` are **skipped**, not deleted: they
+assert on `section_counts` and other diagnostics that belonged to the
+rejected per-branch classifier. Each skip reason names
+`test_topology_reconstruction.py` as the file that now covers the same
+behaviour.
 
 Strategy: unit tests drive real service functions on synthetic rasters
 built with OpenCV drawing primitives (never mocked geometry), with a
@@ -673,6 +762,57 @@ real sheet (every rectangle on it is rounded, so the code path is
 untested on real data); heuristic names are placeholders and currently
 feed export filenames (by design, pending Florence-2 or manual entry).
 
+### 20b. Defects remaining after the topology-first rewrite (2026-09-20)
+
+Found by opening every exported SVG in Chromium and comparing it against
+the source crop, not by reading test results. Ranked by severity.
+
+1. **crop-35 arrowhead is a blob, and this is a regression against the
+   pre-curve-classification output.** The arrow's two barbs meet the
+   shaft in a region only a few pixels across, so the skeleton there is
+   a tiny closed loop (6x7px at stroke width 4) rather than two spurs.
+   `rounded_rect_candidate` wins it and draws a filled-looking dot with
+   a hole. The earlier regularized output produced a pointed teardrop,
+   which read better. The real fix is in graph cleanup — keep the barbs
+   as spurs instead of letting them heal into a micro-loop — not in the
+   fitter. **Not fixed.**
+2. **crop-21 dollar sign: continuous but mis-shaped.** Topology is now
+   correct — one continuous vertical `<line>` crossing one continuous
+   S as a 3-segment cubic path, 0.89px max error, no spurious `Z` — but
+   the S's upper curl bends the wrong way, so the glyph reads closer to
+   a `5` or `&` than a `$`. The vertical bar also stops at the S's
+   extent instead of overshooting it as the source does, because spur
+   pruning trims the overshoot. **Not fixed.**
+3. **crop-31 tall bar top is slightly domed.** The source draws that bar
+   with small rounded outer corners; the composite fitter answers the
+   whole 13px top edge with one arc (sagitta ~2.8px) instead of a flat
+   edge plus two ~3px corner radii. Milder than before the corner-aware
+   composite change, but still visible. **Not fixed.**
+4. **One dash in crop-2 sits ~10° off horizontal** (`32,64.75` to
+   `38,65.84`). A 6px dash's skeleton is noisy enough that its measured
+   angle exceeds the 4° snapping tolerance, so axis alignment correctly
+   leaves it alone. Aligning dashes to a shared baseline with their
+   neighbours would fix it; that is collinearity grouping, which does
+   not exist yet. **Not fixed.**
+5. **Crop boundaries still clip icon edges** on crop-2, crop-31 and
+   crop-35 (visible in every column of the comparison, including the
+   raster). This is segmentation padding, not reconstruction.
+
+Fixed during this rewrite, previously open:
+
+- Bent dashes, pointed pill, wrong `Z` closure, zero-length elements and
+  the fragmented dollar sign — all listed under the rejected experiment
+  in section 22.
+- **Two dashes vanished from crop-2.** `_align_free_ends` clustered both
+  ends of a dash shorter than the clustering tolerance and snapped them
+  to one coordinate, collapsing the dash to zero length; it was then
+  dropped as degenerate. Endpoints belonging to the same segment are now
+  excluded from a shared cluster.
+- **Chart-arrow zigzag arrived smoothed.** Fixed by the `corner-polyline`
+  candidate plus the tangent-retention veto.
+- **Sharp triangular arrowhead (synthetic fixture) came out as cubics.**
+  Now a 3-corner polygon at every blur level tested (sigma 0, 1.4, 2.0).
+
 ## 20a. Model / effort policy
 
 Preserved verbatim from earlier project memory; the authoritative copy
@@ -722,6 +862,20 @@ Summarized here; full dated entries with alternatives considered are in
   implementation: would add an IPC boundary between geometry code and its
   visual feedback loop, the exact pair needing the tightest iteration,
   for no offsetting benefit.
+- **Per-branch curve classification (`f2b3f64`, tag
+  `failed-experiment/curve-classification-v1`).** Implemented, reviewed
+  visually, and **rejected by the user as a quality regression**; never
+  merged to `main`. It classified line/arc/cubic per skeleton *branch*,
+  with no graph and no junction pairing, so a stroke crossing another
+  arrived as several ~15px fragments that could not be reassembled. The
+  visible results: straight dashes bent into cubics, a pill's round ends
+  pinched to points, the arrowhead rendered as a blob, a board edge
+  bowed, a bar's side curved, the dollar sign worse than before — plus,
+  at SVG level, zero-length elements, a fragmented glyph, open paths
+  wrongly closed with `Z`, and no continuous S anywhere. The lesson
+  recorded in `DECISIONS.md` is that topology has to be resolved before
+  geometry, not alongside it. The low-level fitters it introduced were
+  sound and are still used.
 - **Fixed-target angle snapping (`snap_angle`/`snap_segment`, snapping to
   0/45/90/135°).** Implemented, then removed: it would drag a genuine 42°
   diagonal onto 45°, violating "do not snap intentional diagonals."

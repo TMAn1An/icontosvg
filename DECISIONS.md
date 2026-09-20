@@ -369,3 +369,107 @@ visible defect on the real sheet (`PROJECT_MEMORY.md` §20a) and is not
 yet fixed. Any future fix must change how branches are routed through
 junction nodes, informed by the geometry of all arms meeting there — not
 by anything in `curve_fit.py`.
+
+## 2026-09-20 — Topology resolved before geometry, not alongside it
+
+**Problem.** The per-branch curve classifier (`f2b3f64`) fitted each
+skeleton branch in isolation. A stroke that crosses another arrives as
+several short fragments, and no fitter working on one fragment at a time
+can tell that four ~15px pieces are really two continuous strokes. The
+visible result on the dollar sign was a shredded glyph; the user
+rejected the whole change as a quality regression.
+
+**Chosen solution.** A skeleton graph is built and cleaned first;
+branches are paired at each junction by tangent continuity; strokes are
+assembled through those pairings; only then is anything classified, and
+only whole strokes are ever classified. `services/geometry/topology.py`
+owns stages 1–4, `candidates.py` stages 5–6, `line_mode.py` stage 7.
+
+**Alternatives considered.** (a) Post-hoc stitching — fit fragments,
+then try to detect which results continue each other. Rejected: by the
+time a fragment has been fitted to an arc, the evidence that would have
+shown it was half of an S is gone. (b) Fitting across junctions by
+extending each fragment's fit and testing overlap. Rejected as a more
+expensive way to make the same routing decision, but later and with
+worse information. (c) Keeping the previous entry's position that
+junction routing was out of scope for the fitter — that boundary was
+correct, and this change resolves the routing on the *other* side of it,
+in graph construction, exactly as that entry said any fix would have to.
+
+**Reason.** Connectivity is evidence the raster supplies directly and
+cheaply; curvature is inferred. Spending the cheap, reliable evidence
+first constrains every later inference. The inverse order throws the
+connectivity away and then tries to recover it from the inferences.
+
+**Consequences and limitations.** Node degree must be exactly right, and
+this is where the old pipeline actually failed: degree computed by
+clustering 8-adjacent neighbours reports the centre of a `+` as degree
+1, because the four arm pixels are mutually diagonally adjacent. The
+Rutovitz crossing number is now used instead, and any future change to
+degree computation risks silently reintroducing the whole class of
+defect. Pairing is greedy on the most nearly opposite tangents with a
+115° minimum, so three or more strokes crossing at one point may pair
+wrongly; nothing on the test sheet does this, and nothing detects it.
+
+## 2026-09-20 — Corner preservation as a veto, tested on the tangent and not only the distance
+
+**Problem.** "Do not round sharp corners" cannot be enforced by fit
+error. A cubic can thread a zigzag's peak within one pixel — an
+excellent score — and still arrive with a smooth tangent, which is
+exactly how the chart arrow's sharp peaks became waves.
+
+**Chosen solution.** Two vetoes in `evaluate_gate`. Every corner the
+raster shows must lie within `0.6 x stroke width` of the candidate
+outline, *and* the turn measured on the candidate over a fixed arc
+length (`1.5 x stroke width`) must be at least half the turn measured
+the same way on the pixels, for any corner turning 35° or more.
+Measuring both curves over the same arc-length span is what makes the
+two numbers comparable.
+
+**Alternatives considered.** (a) Distance only — shown above not to
+work. (b) Forbidding curve candidates wherever a corner is detected —
+too blunt: a rounded rectangle has four real corners *and* a real
+radius. (c) Penalising candidates in a score instead of vetoing them —
+rejected because the user's requirement is a gate, and a penalty can
+always be outvoted by a large enough error improvement.
+
+**Reason.** A corner is a structural claim about the shape, not a
+tolerance. A veto states that claim; a weight negotiates it away.
+
+**Consequences and limitations.** `detect_corners`'s 38° threshold sets
+what counts as a corner, so shallow corners are still invisible to this
+gate. The retention ratio (0.5) and the turn floor (35°) are tuned
+constants, not derived. A candidate can satisfy both tests and still
+round a corner slightly — crop-31's tall bar top is a live example.
+
+## 2026-09-20 — A chain of straight runs is a first-class candidate
+
+**Problem.** Between the whole-stroke straight candidate and the curve
+candidates there was nothing representing "several straight runs meeting
+at sharp corners". A zigzag therefore competed as a single line (hopeless)
+or as cubics (wins on error, loses the corners).
+
+**Chosen solution.** `corner_polyline_candidate`: fit a line to each run
+between consecutive detected corners, meet adjacent runs at their
+intersection, emit a `<polyline>`. Offered only when *every* run is
+straight within `1.5 x tolerance`, and then *preferred*, so it outranks
+any curve.
+
+**Alternatives considered.** (a) Relying on the RDP baseline, which also
+has sharp corners — rejected: RDP places vertices on sample points, so
+its corners sit wherever the skeleton rounded them, and its error is
+worse than a cubic's, so it loses selection. (b) Letting the composite
+fitter produce it — rejected: composite is greedy left-to-right and does
+not know where the corners are until told, and its pieces meet at sample
+points rather than intersections.
+
+**Reason.** Intersecting the two adjacent fits recovers the corner the
+raster lost to stroke width and blur, which is the one place where the
+reconstruction can legitimately be *sharper* than the pixels.
+
+**Consequences and limitations.** The `1.5 x tolerance` run slack is
+tuned: too tight and a plainly polygonal zigzag falls to a cubic (it
+did, at 1.0x); too loose and a gently curved stroke is faceted. The
+preference makes this candidate outrank curves whenever it exists, so a
+shape that is genuinely part-polygon, part-curve gets the polygon
+reading. Closed strokes are excluded — `polygon_candidate` covers those.

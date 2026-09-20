@@ -263,12 +263,14 @@ def test_rounded_rectangle_keeps_corner_transitions():
 
     document = LineModeStrategy().reconstruct(image)
 
-    paths = [e for e in document.elements if isinstance(e, SvgPath)]
-    assert paths, "a rounded rectangle needs curve commands for its corners"
-    d = paths[0].to_d()
-    # Corners are arcs, not chamfers; the four long edges stay straight.
-    assert d.count("A") >= 4, f"expected four corner arcs, got {d}"
-    assert d.count("L") >= 4, f"expected four straight edges, got {d}"
+    # Under the topology-first pipeline a closed rounded outline is
+    # recognised as a rounded rectangle outright, which preserves the
+    # corners exactly rather than approximating them.
+    from app.services.svg_model import SvgRect
+
+    rects = [e for e in document.elements if isinstance(e, SvgRect)]
+    assert len(rects) == 1
+    assert rects[0].rx > 2.0, "corners must stay rounded"
 
 
 def test_rounded_ends_are_preserved_as_stroke_caps():

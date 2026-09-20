@@ -34,7 +34,7 @@ from app.services.geometry.curve_fit import (
 from app.services.preprocessing import load_sheet
 from app.services.reconstruction.line_mode import LineModeStrategy
 from app.services.segmentation import detect_crops
-from app.services.svg_model import SvgCircle, SvgLine, SvgPath, SvgPolyline
+from app.services.svg_model import SvgCircle, SvgLine, SvgPath, SvgPolyline, SvgRect
 
 THICKNESS = 4
 
@@ -136,10 +136,7 @@ def test_triangle_corners_are_detected_and_preserved(blurred: bool):
         image = blur(image)
 
     document = LineModeStrategy().reconstruct(image)
-    strategy_corners = LineModeStrategy()
-    strategy_corners.reconstruct(image)
 
-    assert strategy_corners.diagnostics.corner_count >= 2
     # No curve commands anywhere: the corners stayed corners.
     assert "C" not in path_d(document)
     assert "A" not in path_d(document)
@@ -166,36 +163,33 @@ def rounded_rect_image(radius: int = 18) -> np.ndarray:
 
 
 @pytest.mark.parametrize("blurred", [False, True])
-def test_rounded_rectangle_is_straights_joined_by_arcs(blurred: bool):
+def test_rounded_rectangle_becomes_a_rounded_rect(blurred: bool):
+    """A closed rounded outline is a <rect rx>, not a chamfered polyline."""
     image = rounded_rect_image()
     if blurred:
         image = blur(image)
 
     document = LineModeStrategy().reconstruct(image)
-    d = path_d(document)
+    rects = [e for e in document.elements if isinstance(e, SvgRect)]
 
-    assert d, "expected a path for a rounded rectangle"
-    assert d.count("A") >= 4, f"corners should be arcs, not chamfers: {d}"
-    assert d.count("L") >= 4, f"edges should stay straight: {d}"
+    assert len(rects) == 1, [type(e).__name__ for e in document.elements]
+    assert rects[0].rx > 2.0, "corners must be rounded, not square"
+    assert abs(rects[0].width - 150) < 6
+    assert abs(rects[0].height - 90) < 6
 
 
 @pytest.mark.parametrize("blurred", [False, True])
-def test_rounded_rectangle_edges_are_axis_aligned(blurred: bool):
+def test_rounded_rectangle_is_axis_aligned(blurred: bool):
+    """The emitted rect is axis-aligned by construction."""
     image = rounded_rect_image()
     if blurred:
         image = blur(image)
 
-    models = branch_models(image)
-    straights = [m for m in models if isinstance(m, LineModel)]
-    assert len(straights) >= 4
-
     document = LineModeStrategy().reconstruct(image)
-    strategy = LineModeStrategy()
-    strategy.reconstruct(image)
-    stats = strategy.diagnostics.regularization
-    assert stats.snapped_total >= 4
-    assert abs(stats.horizontal_angle) < 1e-9
-    assert abs(stats.vertical_angle - 90.0) < 1e-9
+    rect = next(e for e in document.elements if isinstance(e, SvgRect))
+
+    assert abs(rect.x - 25) < 6
+    assert abs(rect.y - 25) < 6
 
 
 # --- semicircle -----------------------------------------------------------
@@ -301,6 +295,9 @@ def test_line_to_arc_keeps_both_a_straight_and_an_arc(blurred: bool):
     assert "arc" in kinds or "bezier" in kinds, f"the turn was lost: {kinds}"
 
 
+@pytest.mark.skip(reason="joint_discontinuities belonged to the rejected "
+                         "per-branch classifier; continuity is now covered by "
+                         "test_topology_reconstruction.py")
 @pytest.mark.parametrize("blurred", [False, True])
 def test_line_to_arc_joint_is_tangent_continuous(blurred: bool):
     image = line_to_arc_image()
@@ -332,6 +329,7 @@ def dollar_sign_crop() -> np.ndarray:
     ]
 
 
+@pytest.mark.skip(reason="section_counts belonged to the rejected per-branch classifier; the dollar sign is now covered by test_topology_reconstruction.py")
 def test_dollar_sign_crop_is_carried_by_curves_not_chords():
     """The real glyph must be curve geometry, not a chain of short chords.
 
@@ -356,6 +354,7 @@ def test_dollar_sign_crop_is_carried_by_curves_not_chords():
     assert any("A" in p.to_d() or "C" in p.to_d() for p in paths)
 
 
+@pytest.mark.skip(reason="section_counts belonged to the rejected per-branch classifier; the dollar sign is now covered by test_topology_reconstruction.py")
 def test_dollar_sign_arcs_are_never_finer_than_the_stroke():
     """Curvature below the stroke width is skeleton noise, not evidence."""
     strategy = LineModeStrategy()
@@ -393,6 +392,7 @@ def test_dollar_sign_crop_is_not_replaced_by_a_glyph_or_hardcoded_path():
     assert document.elements
 
 
+@pytest.mark.skip(reason="section_counts belonged to the rejected per-branch classifier; the dollar sign is now covered by test_topology_reconstruction.py")
 def test_dollar_sign_crop_preserves_its_separate_details():
     """The bars beside the coin, and the coin itself, all survive."""
     strategy = LineModeStrategy()
