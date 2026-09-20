@@ -673,6 +673,18 @@ real sheet (every rectangle on it is rounded, so the code path is
 untested on real data); heuristic names are placeholders and currently
 feed export filenames (by design, pending Florence-2 or manual entry).
 
+## 20a. Model / effort policy
+
+Preserved verbatim from earlier project memory; the authoritative copy
+lives in `CLAUDE.md`, restated here so this file remains self-contained.
+
+Per `CLAUDE.md`: Opus at high effort for geometry reconstruction,
+centerline extraction, curve fitting and quality-metric debugging; Sonnet
+at medium for UI, tests, refactoring, docs and straightforward service
+work; Haiku at low for mechanical edits only. State current model/effort
+before a major task and stop for the user to switch manually rather than
+switching unilaterally.
+
 ## 21. Important technical decisions and reasons
 
 Summarized here; full dated entries with alternatives considered are in
