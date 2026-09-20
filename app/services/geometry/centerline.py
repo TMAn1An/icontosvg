@@ -166,10 +166,13 @@ def trace_branches(skeleton: np.ndarray) -> list[np.ndarray]:
 def prune_spurs(
     branches: list[np.ndarray], skeleton: np.ndarray, stroke_width: float
 ) -> list[np.ndarray]:
-    """Drop short dead-end branches created by stroke caps and corners.
+    """Drop short dead-end stubs created by stroke caps and corners.
 
-    A spur is a branch with a free end whose length is under roughly one
-    stroke width — too short to be intended geometry.
+    A spur hangs off real structure: one end is free, the other is a
+    junction. A short branch that is free at *both* ends is not a spur but
+    a standalone detail — a dash, a tick, the dot of an "i" — and
+    deleting it silently loses meaningful geometry, so it is kept
+    regardless of length.
     """
     if stroke_width <= 0:
         return branches
@@ -186,11 +189,12 @@ def prune_spurs(
 
         start_pixel = (int(branch[0][1]), int(branch[0][0]))
         end_pixel = (int(branch[-1][1]), int(branch[-1][0]))
-        has_free_end = (
-            _neighbor_group_count(skeleton, start_pixel) == 1
-            or _neighbor_group_count(skeleton, end_pixel) == 1
-        )
-        if not has_free_end:
+        start_degree = _neighbor_group_count(skeleton, start_pixel)
+        end_degree = _neighbor_group_count(skeleton, end_pixel)
+
+        free_ends = (start_degree <= 1) + (end_degree <= 1)
+        is_stub = free_ends == 1 and max(start_degree, end_degree) >= 3
+        if not is_stub:
             kept.append(branch)
     return kept
 

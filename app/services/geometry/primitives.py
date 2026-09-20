@@ -41,34 +41,6 @@ class CircleFit:
     max_residual: float
 
 
-def snap_angle(angle_degrees: float, tolerance_degrees: float = 5.0) -> float:
-    """Snap a near-axis-aligned or near-45-degree angle to the exact value.
-
-    JPEG noise on straight strokes should collapse to one stable angle
-    rather than a family of near-duplicate angles.
-    """
-    snap_targets = (-180.0, -135.0, -90.0, -45.0, 0.0, 45.0, 90.0, 135.0, 180.0)
-    for target in snap_targets:
-        if abs(angle_degrees - target) <= tolerance_degrees:
-            return target
-    return angle_degrees
-
-
-def snap_segment(segment: LineSegment, tolerance_degrees: float = 5.0) -> LineSegment:
-    """Rotate a segment about its midpoint onto a snapped angle, if close."""
-    snapped = snap_angle(segment.angle_degrees, tolerance_degrees)
-    if snapped == segment.angle_degrees:
-        return segment
-
-    half_length = segment.length / 2
-    radians = np.radians(snapped)
-    mid_x = (segment.x1 + segment.x2) / 2
-    mid_y = (segment.y1 + segment.y2) / 2
-    dx = float(np.cos(radians)) * half_length
-    dy = float(np.sin(radians)) * half_length
-    return LineSegment(mid_x - dx, mid_y - dy, mid_x + dx, mid_y + dy)
-
-
 def fit_circle(points: np.ndarray) -> CircleFit:
     """Algebraic (Kasa) least-squares circle fit over (N, 2) x/y points."""
     if len(points) < 3:

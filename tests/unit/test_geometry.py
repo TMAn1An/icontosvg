@@ -14,37 +14,13 @@ from app.services.geometry.primitives import (
     LineSegment,
     fit_circle,
     is_axis_aligned_rectangle,
-    snap_angle,
-    snap_segment,
 )
-
-
-def test_snap_angle_snaps_near_horizontal_noise():
-    assert snap_angle(2.0) == 0.0
-    assert snap_angle(-1.5) == 0.0
-    assert snap_angle(88.0) == 90.0
-
-
-def test_snap_angle_leaves_non_axis_angles_alone():
-    assert snap_angle(30.0) == 30.0
 
 
 def test_line_segment_length_and_angle():
     segment = LineSegment(x1=0, y1=0, x2=10, y2=0)
     assert segment.length == 10.0
     assert segment.angle_degrees == 0.0
-
-
-def test_snap_segment_straightens_jpeg_noise_about_midpoint():
-    """A stroke 2 degrees off horizontal becomes exactly horizontal."""
-    noisy = LineSegment(x1=0.0, y1=0.0, x2=100.0, y2=3.5)
-    snapped = snap_segment(noisy)
-
-    assert snapped.angle_degrees == 0.0
-    assert round(snapped.y1, 6) == round(snapped.y2, 6)
-    assert abs(snapped.length - noisy.length) < 1e-9
-    # Midpoint is preserved, so the stroke does not drift.
-    assert round((snapped.x1 + snapped.x2) / 2, 6) == 50.0
 
 
 def test_trace_branches_on_horizontal_line_gives_one_straight_branch():
