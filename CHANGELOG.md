@@ -4,13 +4,37 @@ All notable changes to Icon Sheet Studio. Dates are ISO 8601.
 
 ## [Unreleased]
 
+### Added — curve-versus-corner classification
+
+- `services/geometry/curve_fit.py`: neighborhood-based corner proposal,
+  robust line fitting, circular-arc fitting with a monotone-sweep test,
+  cubic Bezier fitting with parameter refinement, and simplest-adequate
+  model selection over line/arc/cubic with the candidate errors recorded
+  for auditing.
+- `SvgPath` with structured M/L/A/C commands, so one branch mixing
+  straight, arc and cubic sections stays a single editable stroke.
+- Joint resolution: sharp corners by line intersection, smooth joints by
+  tangent matching, with the residual discontinuity measured and
+  reported rather than assumed.
+- 34 curve-classification tests: sharp triangle, rounded rectangle,
+  semicircle, S-curve, line-to-arc transition and the real dollar-sign
+  crop, each with a blurred + JPEG-recompressed variant.
+
+### Fixed
+
+- Curves no longer shredded into chords. Across the 50-icon sheet the
+  output went from 0 arcs / 0 Beziers to 257 arcs / 52 cubics, with fit
+  errors staying sub-pixel (line 0.26 mean, arc 0.67, cubic 0.75).
+- Arcs finer than the stroke, and shallow arcs standing in for bowed
+  straights, are both rejected on physical grounds.
+
 ### Planned next, in defect priority order
 
-- Arc / rounded-corner fitting in `services/geometry/curve_fit.py` —
-  rounded corners currently emit as chamfers, now the most visible
-  remaining defect.
+- Junction routing — the largest remaining source of defects; it
+  fragments the dollar sign and bends skeletons near T-junctions.
+- Corner radii below ~1.6px sagitta still chamfer (only 1 of 4 corners
+  on the credit-card frame became an arc).
 - Stroke-width estimator rework — currently overestimates ~15–25%.
-- Tighten the edge-alignment and stroke-consistency metrics.
 - Filled reconstruction mode (stub exists, interface fixed).
 
 ## [0.1.0] — 2026-09-20

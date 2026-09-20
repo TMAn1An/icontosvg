@@ -131,6 +131,54 @@ Three guards protect intent:
   still eligible — it has no corner to protect);
 - circles never reach the regularizer at all.
 
+### Curve-versus-corner classification
+
+`geometry/curve_fit.py`. A pipeline whose only open-geometry model is a
+straight line has nowhere to put curvature: RDP shreds every smooth bend
+into short chords that are each within tolerance yet have collectively
+stopped being a curve. Measured before the fix: 34% of the sheet's
+centerline length is genuinely curved, and the output contained **zero**
+arcs and zero Beziers — the sole curve primitive was `<circle>`, gated on
+closed loops, so no open arc could ever be recognised.
+
+Classification runs **before** simplification, on the ordered samples:
+
+- corners come from tangent turning over a neighborhood, never one pixel,
+  and must *concentrate* that turn (an arc turns evenly, so its peak
+  barely exceeds its neighbourhood median) and be *local* (a tight curve
+  keeps turning on both sides of its peak);
+- a corner's own samples are trimmed out of the neighbouring edge fits by
+  an adaptive extent, since blur widens a corner; the corner itself is
+  recovered by intersecting the two edges;
+- model choice is simplest-adequate: line (2 dof) -> arc (3) -> cubic
+  (6), each judged by worst residual against a sub-pixel tolerance.
+
+Load-bearing gates, each of which exists because its absence produced a
+visible defect:
+
+- **an arc must have sagitta >= 0.4 x stroke width.** Without it, a
+  straight run carrying a little JPEG bow is promoted to a shallow arc
+  and a flat edge comes out domed.
+- **an arc's radius must be >= 0.6 x stroke width.** Curvature finer than
+  the stroke that drew it is skeleton noise; without this the dollar sign
+  emitted radius-1.3px arcs.
+- **a straight run must be >= 4 x stroke width** and near-zero turning
+  along its whole extent, verified by an actual line fit rather than the
+  turning profile alone. A short enough chunk of *any* large-radius arc
+  fits a line within tolerance, so without this a clean semicircle gets a
+  flat nibble carved out of its middle, and an S-curve gets split at its
+  inflection where curvature genuinely passes through zero.
+- **arc tangent matching is only adopted if the implied radius stays
+  within 0.5x-2x of the fitted one.** Forcing it collapses the radius
+  toward the joint.
+
+Only sections classified straight are handed to the axis-alignment pass,
+so no amount of snapping can touch a curve. Joints are then closed:
+sharp ones by intersecting the two lines, smooth ones by matching
+tangents (a Bezier rotates its handle; an arc moves its centre onto the
+normal through the joint). Where a straight meets a curve the straight
+wins the tangent, so axis alignment survives the joint.
+
 **Removed deliberately:** the earlier `snap_angle`/`snap_segment` pair,
 which snapped to fixed 0/45/90/135 targets. That would drag a genuine 42°
 diagonal onto 45°. Data-driven shared axes replace it; do not reintroduce

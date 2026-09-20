@@ -65,7 +65,84 @@ class SvgPolyline:
     points: list[tuple[float, float]]
 
 
-SvgElement = SvgLine | SvgCircle | SvgEllipse | SvgRect | SvgPolyline
+@dataclass
+class PathMoveTo:
+    x: float
+    y: float
+
+
+@dataclass
+class PathLineTo:
+    x: float
+    y: float
+
+
+@dataclass
+class PathArcTo:
+    """Elliptical-arc command. Circular arcs set rx == ry."""
+
+    rx: float
+    ry: float
+    large_arc: bool
+    sweep: bool
+    x: float
+    y: float
+
+
+@dataclass
+class PathCubicTo:
+    x1: float
+    y1: float
+    x2: float
+    y2: float
+    x: float
+    y: float
+
+
+PathCommand = PathMoveTo | PathLineTo | PathArcTo | PathCubicTo
+
+
+@dataclass
+class SvgPath:
+    """A single stroke mixing straight, arc and cubic sections.
+
+    Used when one centerline branch needs more than one kind of section,
+    so the whole stroke stays a single editable path rather than being
+    broken into disconnected pieces.
+    """
+
+    commands: list[PathCommand]
+    closed: bool = False
+
+    def to_d(self) -> str:
+        parts: list[str] = []
+        for command in self.commands:
+            if isinstance(command, PathMoveTo):
+                parts.append(f"M {_num(command.x)} {_num(command.y)}")
+            elif isinstance(command, PathLineTo):
+                parts.append(f"L {_num(command.x)} {_num(command.y)}")
+            elif isinstance(command, PathArcTo):
+                parts.append(
+                    f"A {_num(command.rx)} {_num(command.ry)} 0 "
+                    f"{int(command.large_arc)} {int(command.sweep)} "
+                    f"{_num(command.x)} {_num(command.y)}"
+                )
+            elif isinstance(command, PathCubicTo):
+                parts.append(
+                    f"C {_num(command.x1)} {_num(command.y1)} "
+                    f"{_num(command.x2)} {_num(command.y2)} "
+                    f"{_num(command.x)} {_num(command.y)}"
+                )
+        if self.closed:
+            parts.append("Z")
+        return " ".join(parts)
+
+    def anchor_count(self) -> int:
+        """On-curve points; Bezier handles are not anchors in editing terms."""
+        return sum(1 for command in self.commands if not isinstance(command, PathMoveTo)) + 1
+
+
+SvgElement = SvgLine | SvgCircle | SvgEllipse | SvgRect | SvgPolyline | SvgPath
 
 
 @dataclass
@@ -131,17 +208,21 @@ class SvgDocument:
             elif isinstance(element, SvgPolyline):
                 points = " ".join(f"{_num(x)},{_num(y)}" for x, y in element.points)
                 ET.SubElement(svg, "polyline", {"points": points})
+            elif isinstance(element, SvgPath):
+                ET.SubElement(svg, "path", {"d": element.to_d()})
 
         return ET.tostring(svg, encoding="unicode")
 
     def anchor_count(self) -> int:
-        """Total control points across all elements, for quality reporting."""
+        """Total on-curve anchors across all elements, for quality reporting."""
         total = 0
         for element in self.elements:
             if isinstance(element, SvgLine):
                 total += 2
             elif isinstance(element, SvgPolyline):
                 total += len(element.points)
+            elif isinstance(element, SvgPath):
+                total += element.anchor_count()
             else:
                 total += 1
         return total

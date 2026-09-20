@@ -158,3 +158,89 @@ Ranked by visual impact.
 | NaN from zero-length closed-loop sections | degenerate sections dropped at fit time |
 | Spurious 179.97° max correction in stats | wrap-aware angular distance |
 | Fixed 0/45/90/135 snapping would drag genuine diagonals | replaced with data-driven axes |
+
+---
+
+## 2026-09-20 — curve-versus-corner classification
+
+**Suite:** 79 tests, all passing (34 new curve-classification tests, each
+shape fixture in crisp and blurred+JPEG-recompressed variants).
+
+### Where curve information was being lost
+
+Measured, not assumed. Chord error from the samples to their fitted
+straight section was capped at ~0.96px almost everywhere — RDP with a
+1.40px epsilon guarantees that. So curves were **not** being flattened
+into one bad chord; they were being shredded into many short chords,
+each individually accurate, that had collectively stopped being a curve.
+
+| measurement | value |
+|---|---|
+| centerline length that is genuinely curved | **34.0%** (14,288 of 42,021 px) |
+| open arcs emitted | **0** (`_append_circle` required a closed loop) |
+| cubic Beziers emitted | **0** (no Bezier model existed) |
+| sections deviating >1px from their straight fit | 29 of 3,771 (0.8%) |
+
+The stage visualization (`outputs/stages-dollar-sign.png`) shows the
+skeleton holding the S-curve and the coin ring perfectly, and the next
+stage replacing the ring with an octagon. Regularized geometry is
+identical in shape to the RDP stage, confirming that axis snapping did
+not cause the dollar-sign defect.
+
+### After classification, all 50 icons
+
+| | before | after |
+|---|---|---|
+| straight sections | 3,771 | 2,747 |
+| circular arcs | **0** | **257** |
+| cubic Beziers | **0** | **52** |
+| corners detected | n/a | 677 |
+
+Fit error stays sub-pixel for every model: line mean 0.26 / p95 0.90,
+arc mean 0.67 / p95 1.10, cubic mean 0.75 / p95 1.09.
+
+Anchors per icon went **down**, measured from the emitted files:
+crop-21 48→35, crop-31 29→24, crop-2 38→33, crop-35 60→53. That is
+recorded as an observation, not as evidence of quality.
+
+### Curve continuity
+
+Split by joint type, because the two mean different things:
+
+| joint kind | n | median | under 10° |
+|---|---|---|---|
+| a curve meets something (smoothness is asserted) | 211 | **0.0°** | **91%** |
+| two straights, not flagged as a corner | 287 | 19.7° | 15% |
+
+The first row is the G1 machinery working. The second row is not a
+continuity failure but a **missed-corner** measurement: a shallow corner
+below the 38° detection threshold arrives as two straights meeting at an
+angle. It is drawn correctly (the corner comes from intersecting the two
+lines) but is not labelled a corner.
+
+### Fidelity scores
+
+| icon | SSIM before | SSIM after | IoU before | IoU after |
+|---|---|---|---|---|
+| crop-21 | 0.7813 | 0.7637 | 0.6852 | 0.6671 |
+| crop-31 | 0.7511 | 0.7416 | 0.6491 | 0.6417 |
+| crop-2 | 0.8027 | 0.7827 | 0.6324 | 0.6170 |
+| crop-35 | 0.8003 | 0.8001 | 0.7042 | 0.6871 |
+
+Slightly down again, for the same reason as the previous entry: these
+score pixel overlap against a blurry JPEG, and replacing a chord chain
+with a true curve moves geometry away from the blur. Not treated as
+evidence either way.
+
+## Open defects (updated)
+
+| # | defect | status |
+|---|---|---|
+| 1 | **Junction routing.** The largest remaining source of visible error. The vertical bar crossing the dollar sign splits the glyph into ~15px fragments, so a fragment has one sign of curvature and gets an arc rather than a cubic; skeletons also bend near T-junctions, which is what bows a bar top. Out of scope for a curve fitter by definition. | open |
+| 2 | **Small corners still chamfer.** A corner whose sagitta falls below 0.4 x stroke width is rejected as an arc. On the credit-card frame only **1 of 4** corners became an arc; the rest are `L` commands. At a 4px stroke `stroke-linejoin="round"` visually masks this, which makes it easy to overclaim. | open |
+| 3 | **Shallow corners go undetected** (38° threshold), surfacing as the 287 straight-straight joints above. | open |
+| 4 | **An arc can only be made tangent at one end** without abandoning the radius the samples showed, so a line-arc-line run may keep a small kink at its second joint (measured 14.1° on the line-to-arc fixture). | accepted |
+| 5 | Blur bows an edge past the sub-pixel tolerance, so a blurred triangle edge may be reported as two nearly-collinear straights. | accepted |
+| 6 | Stroke width overestimated ~15-25%. | open |
+| 7 | Edge-alignment metric too lenient; stroke-consistency inflated by junctions. | open |
+| 8 | Heuristic names are placeholders. | by design |
