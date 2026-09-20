@@ -18,7 +18,7 @@ from app.services.geometry.regularize import (
     fit_sections,
 )
 from app.services.reconstruction.line_mode import LineModeStrategy
-from app.services.svg_model import SvgCircle, SvgLine, SvgPolyline, SvgRect
+from app.services.svg_model import SvgCircle, SvgLine, SvgPath, SvgPolyline, SvgRect
 
 
 def blank(height: int, width: int) -> np.ndarray:
@@ -217,10 +217,13 @@ def test_wavy_curve_keeps_its_intermediate_vertices():
         draw_line(image, (int(x1), int(y1)), (int(x2), int(y2)))
 
     document = LineModeStrategy().reconstruct(image)
-    polylines = [e for e in document.elements if isinstance(e, SvgPolyline)]
 
-    assert polylines, "a curve must not collapse into a single straight line"
-    assert max(len(p.points) for p in polylines) >= 6
+    # A curve is now carried by real curve commands, not a chain of chords.
+    paths = [e for e in document.elements if isinstance(e, SvgPath)]
+    assert paths, "a curve must not collapse into straight segments"
+    d = paths[0].to_d()
+    assert "C" in d or "A" in d, f"expected curve commands, got {d}"
+    assert not any(isinstance(e, SvgPolyline) for e in document.elements)
 
 
 # --- 6. rounded rectangles retain rounded corners ------------------------
@@ -259,18 +262,15 @@ def test_rounded_rectangle_keeps_corner_transitions():
     draw_rounded_rect(image, 25, 25, 175, 115, radius=18)
 
     document = LineModeStrategy().reconstruct(image)
-    polylines = [e for e in document.elements if isinstance(e, SvgPolyline)]
 
-    assert polylines
-    outline = max(polylines, key=lambda p: len(p.points))
-    # A squared-off result would need only 4 corners; rounded corners
-    # contribute extra vertices between the straight edges.
-    assert len(outline.points) > 5
+    # Under the topology-first pipeline a closed rounded outline is
+    # recognised as a rounded rectangle outright, which preserves the
+    # corners exactly rather than approximating them.
+    from app.services.svg_model import SvgRect
 
-    angles = segment_angles(outline)
-    axis_aligned = [a for a in angles if abs(a) < 1e-6 or abs(abs(a) - 90) < 1e-6]
-    assert len(axis_aligned) >= 4, "long edges should be exactly axis-aligned"
-    assert any(2.0 < abs(a) < 88.0 for a in angles), "corner transitions should survive"
+    rects = [e for e in document.elements if isinstance(e, SvgRect)]
+    assert len(rects) == 1
+    assert rects[0].rx > 2.0, "corners must stay rounded"
 
 
 def test_rounded_ends_are_preserved_as_stroke_caps():

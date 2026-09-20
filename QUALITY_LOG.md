@@ -13,6 +13,14 @@ threshold 128. A 5x10 grid of 50 line icons.
 
 ## 2026-09-20 — Phase 1 slice, geometry regularization
 
+**Commit:** `a510ccd` (regularization work); checkpointed with
+documentation at `569e804`. Branch `claude/happy-carson-lh8mr7`.
+
+**Icons tested:** crop-31 (monitor + bars), crop-2 (credit card), crop-35
+(presentation board), crop-21 (coin + dollar sign + bars) sampled in
+detail; all 50 crops on `fixtures/real/finance-icon-sheet.jpg` measured
+in aggregate.
+
 **Suite:** 45 tests, all passing (Python 3.11.15, PySide6 6.11.2).
 
 ### Segmentation
@@ -158,3 +166,183 @@ Ranked by visual impact.
 | NaN from zero-length closed-loop sections | degenerate sections dropped at fit time |
 | Spurious 179.97° max correction in stats | wrap-aware angular distance |
 | Fixed 0/45/90/135 snapping would drag genuine diagonals | replaced with data-driven axes |
+
+---
+
+## 2026-09-20 — curve-versus-corner classification
+
+**Commit:** `f2b3f64`. Branch `claude/happy-carson-lh8mr7`.
+
+**Icons tested:** the same four sampled icons (crop-31, crop-2, crop-35,
+crop-21) plus all 50 crops on `fixtures/real/finance-icon-sheet.jpg` in
+aggregate; six synthetic fixture families (sharp triangle, rounded
+rectangle, semicircle, S-curve, line-to-arc transition) each in crisp and
+blurred+JPEG-recompressed variants, plus the real dollar-sign crop
+(crop-21) directly.
+
+**Suite:** 79 tests, all passing (34 new curve-classification tests, each
+shape fixture in crisp and blurred+JPEG-recompressed variants).
+
+### Where curve information was being lost
+
+Measured, not assumed. Chord error from the samples to their fitted
+straight section was capped at ~0.96px almost everywhere — RDP with a
+1.40px epsilon guarantees that. So curves were **not** being flattened
+into one bad chord; they were being shredded into many short chords,
+each individually accurate, that had collectively stopped being a curve.
+
+| measurement | value |
+|---|---|
+| centerline length that is genuinely curved | **34.0%** (14,288 of 42,021 px) |
+| open arcs emitted | **0** (`_append_circle` required a closed loop) |
+| cubic Beziers emitted | **0** (no Bezier model existed) |
+| sections deviating >1px from their straight fit | 29 of 3,771 (0.8%) |
+
+The stage visualization (`outputs/stages-dollar-sign.png`) shows the
+skeleton holding the S-curve and the coin ring perfectly, and the next
+stage replacing the ring with an octagon. Regularized geometry is
+identical in shape to the RDP stage, confirming that axis snapping did
+not cause the dollar-sign defect.
+
+### After classification, all 50 icons
+
+| | before | after |
+|---|---|---|
+| straight sections | 3,771 | 2,747 |
+| circular arcs | **0** | **257** |
+| cubic Beziers | **0** | **52** |
+| corners detected | n/a | 677 |
+
+Fit error stays sub-pixel for every model: line mean 0.26 / p95 0.90,
+arc mean 0.67 / p95 1.10, cubic mean 0.75 / p95 1.09.
+
+Anchors per icon went **down**, measured from the emitted files:
+crop-21 48→35, crop-31 29→24, crop-2 38→33, crop-35 60→53. That is
+recorded as an observation, not as evidence of quality.
+
+### Curve continuity
+
+Split by joint type, because the two mean different things:
+
+| joint kind | n | median | under 10° |
+|---|---|---|---|
+| a curve meets something (smoothness is asserted) | 211 | **0.0°** | **91%** |
+| two straights, not flagged as a corner | 287 | 19.7° | 15% |
+
+The first row is the G1 machinery working. The second row is not a
+continuity failure but a **missed-corner** measurement: a shallow corner
+below the 38° detection threshold arrives as two straights meeting at an
+angle. It is drawn correctly (the corner comes from intersecting the two
+lines) but is not labelled a corner.
+
+### Fidelity scores
+
+| icon | SSIM before | SSIM after | IoU before | IoU after |
+|---|---|---|---|---|
+| crop-21 | 0.7813 | 0.7637 | 0.6852 | 0.6671 |
+| crop-31 | 0.7511 | 0.7416 | 0.6491 | 0.6417 |
+| crop-2 | 0.8027 | 0.7827 | 0.6324 | 0.6170 |
+| crop-35 | 0.8003 | 0.8001 | 0.7042 | 0.6871 |
+
+Slightly down again, for the same reason as the previous entry: these
+score pixel overlap against a blurry JPEG, and replacing a chord chain
+with a true curve moves geometry away from the blur. Not treated as
+evidence either way.
+
+## Open defects (updated)
+
+| # | defect | status |
+|---|---|---|
+| 1 | **Junction routing.** The largest remaining source of visible error. The vertical bar crossing the dollar sign splits the glyph into ~15px fragments, so a fragment has one sign of curvature and gets an arc rather than a cubic; skeletons also bend near T-junctions, which is what bows a bar top. Out of scope for a curve fitter by definition. | open |
+| 2 | **Small corners still chamfer.** A corner whose sagitta falls below 0.4 x stroke width is rejected as an arc. On the credit-card frame only **1 of 4** corners became an arc; the rest are `L` commands. At a 4px stroke `stroke-linejoin="round"` visually masks this, which makes it easy to overclaim. | open |
+| 3 | **Shallow corners go undetected** (38° threshold), surfacing as the 287 straight-straight joints above. | open |
+| 4 | **An arc can only be made tangent at one end** without abandoning the radius the samples showed, so a line-arc-line run may keep a small kink at its second joint (measured 14.1° on the line-to-arc fixture). | accepted |
+| 5 | Blur bows an edge past the sub-pixel tolerance, so a blurred triangle edge may be reported as two nearly-collinear straights. | accepted |
+| 6 | Stroke width overestimated ~15-25%. | open |
+| 7 | Edge-alignment metric too lenient; stroke-consistency inflated by junctions. | open |
+| 8 | Heuristic names are placeholders. | by design |
+
+## 2026-09-20 — Topology-first, confidence-gated reconstruction
+
+Working tree on branch `claude/happy-carson-lh8mr7`; commit hash recorded
+at the bottom of this entry. Replaces the per-branch classifier of
+`f2b3f64`, rejected by the user as a quality regression and preserved at
+tag `failed-experiment/curve-classification-v1`.
+
+**How this was judged.** Every SVG below was rendered in Chromium
+(`/opt/pw-browsers/chromium-1194`, device scale factor 3) and compared
+side by side against its source crop. SSIM and IoU are recorded for
+continuity with earlier entries only; per `DECISIONS.md` they are not
+the arbiter for geometry straightening, and nothing here was accepted or
+rejected on them.
+
+### Icons tested
+
+Four real crops from `fixtures/real/finance-icon-sheet.jpg`, rendered as
+a four-column comparison in `outputs/topology-four-column.png` (original
+raster | previous regularized | failed curve-classification |
+topology-first), with a detail zoom in `outputs/topology-detail-zoom.png`.
+
+| icon | SSIM | IoU | anchors | element mix |
+|---|---|---|---|---|
+| crop-21 | 0.8171 | 0.6977 | 28 | circle 1, corner-polyline 1, bezier 1, line 1, polyline 3 |
+| crop-31 | 0.7924 | 0.6906 | 28 | polyline 2, circle 1, line 2, composite 1, corner-polyline 1 |
+| crop-2  | 0.8072 | 0.7164 | 24 | polyline 1, rounded-rect 2, line 7 |
+| crop-35 | 0.7898 | 0.6176 | 25 | rounded-rect 1, polyline 3, corner-polyline 1 |
+
+SSIM is up on all four against the previous entry (0.7637 / 0.7416 /
+0.7827 / 0.8001). That is reported, not claimed as proof: the same
+metric fell on the change the user then rejected, which is precisely why
+it is not the arbiter.
+
+### Whole-sheet numbers
+
+All 50 crops: 743 strokes assembled through 605 junction pairings; 426
+`line`, 104 `polyline`, 89 `bezier`, 38 `corner-polyline`, 27 `circle`,
+23 `composite`, 18 `arc`, 17 `rounded-rect`, 1 `polygon`; 2,642 anchors;
+**0 degenerate elements removed, 0 strokes flagged for review, 0 invalid
+SVG documents**. Test suite: 103 passed, 5 skipped.
+
+`QualityReport.manual_review_status` remains `"pending"` on every icon.
+Nothing in this entry changes it.
+
+### Visual-review findings, before → after
+
+| # | finding | before | after |
+|---|---|---|---|
+| 1 | dollar sign fragmented at its crossings | 4 unrelated arc fragments, no continuous stroke | one continuous vertical `<line>` + one continuous S as a 3-segment cubic path (0.89px max error) + the coin `<circle>` |
+| 2 | `junctions: 0` reported on a glyph with two crossings | node degree from 8-adjacency clustering | Rutovitz crossing number; crop-21 now reports 3 junctions, 4 pairings |
+| 3 | two dashes missing from crop-2 | endpoint clustering collapsed each short dash to zero length, then dropped it | all six dashes in the crop survive; `removed_degenerate` 0 sheet-wide |
+| 4 | chart-arrow zigzag smoothed into waves | cubic chain | sharp 6-point `corner-polyline` |
+| 5 | bar tops replaced by domes | arc spanning the flat top and both corners | corner-bounded composite pieces; crop-31's short bars flat, tall bar improved but still domed (see defect 3 below) |
+| 6 | open paths wrongly closed with `Z` | present | none; closure mismatch is a gate veto |
+| 7 | synthetic sharp arrowhead emitted as cubics | cubic chain | 3-corner polygon at blur sigma 0, 1.4 and 2.0 |
+
+### Metric limitations encountered
+
+- SSIM/IoU rose here and fell on the rejected change; on a blurry JPEG
+  source neither direction is evidence about geometry. Unchanged from
+  the two earlier entries — this is now the third consecutive time the
+  metric disagreed with the visual verdict.
+- `max_error` against the traced skeleton rewards a curve that chases
+  skeleton wobble. The corner-turn retention test exists because a cubic
+  can pass within a pixel of a zigzag's peak and still arrive smooth,
+  which no distance metric catches.
+- Corner *count* still under-reports: `detect_corners`'s 38° threshold
+  leaves shallow corners unlabelled (carried over from the previous
+  entry, item 3 of the open list).
+
+### Remaining defects (honest list)
+
+| # | defect | status |
+|---|---|---|
+| 1 | **crop-35 arrowhead is a blob** — the barbs form a 6x7px closed loop in the skeleton and win a `rounded-rect`. This is a **regression** against the pre-`0.2.0` output, which produced a pointed teardrop. The fix belongs in graph cleanup (keep the barbs as spurs), not the fitter. | open |
+| 2 | **crop-21 S is continuous but mis-shaped** — the upper curl bends the wrong way, so the glyph reads closer to `5` or `&` than `$`. The vertical bar also stops at the S's extent instead of overshooting it, because spur pruning trims the overshoot. | open |
+| 3 | **crop-31 tall bar top slightly domed** — one arc of sagitta ~2.8px over the whole 13px top, where the source has a flat edge with two ~3px corner radii. | open |
+| 4 | **one crop-2 dash ~10° off horizontal** — a 6px dash's skeleton angle exceeds the 4° snapping tolerance, so alignment correctly leaves it. Needs collinearity grouping across dashes, which does not exist. | open |
+| 5 | Crop boundaries clip icon edges on crop-2, crop-31, crop-35 (segmentation padding, visible in the raster column too). | open |
+| 6 | Stroke width still overestimated ~15-25% (carried over, unchanged). | open |
+| 7 | Edge-alignment metric too lenient; stroke-consistency inflated by junctions (carried over, unchanged). | open |
+
+Defects 1 and 2 of the previous entry's open list — junction routing and
+the fragmented glyph — are **resolved** by the graph and pairing stages.
