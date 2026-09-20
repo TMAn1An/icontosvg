@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+*.egg-info/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Generated output (exported SVGs, quality reports, project files)
+outputs/*
+!outputs/.gitkeep
+
+# Model weights / caches (Florence-2, torch, huggingface)
+.cache/
+*.cache
+models/
+~/.cache/huggingface/
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/

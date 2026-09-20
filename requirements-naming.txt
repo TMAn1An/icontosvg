@@ -1,0 +1,8 @@
+# Optional. Only required to use Florence2NamingProvider
+# (app/services/naming/florence2.py). The application runs fully without
+# this file installed, using HeuristicNamingProvider by default.
+-r requirements.txt
+torch>=2.2
+transformers>=4.40
+einops>=0.7
+timm>=0.9
