@@ -8,11 +8,15 @@ earlier IconSheetStudio codebase.
 
 ## Status
 
-Phase 1, slice 1 in progress: upload -> preprocess -> detect one icon ->
-editable crop -> heuristic name -> centerline reconstruction -> SVG export
--> render/compare. Line-icon mode only; filled and mixed modes are
-interface stubs (`app/services/reconstruction/filled_mode.py`,
-`mixed_mode.py`).
+Phase 1 vertical slice, verified end to end on the real 50-icon finance
+sheet: upload -> preprocess -> detect crops -> heuristic name ->
+centerline reconstruction with line/corner/arc/Bézier classification ->
+clean SVG export -> render/compare in two independent renderers.
+Line-icon mode only; filled and mixed modes are interface stubs
+(`app/services/reconstruction/filled_mode.py`, `mixed_mode.py`). The UI
+tabs exist as widget shells but are not yet wired to the pipeline — see
+`PROJECT_MEMORY.md` for the full completed/stub breakdown and
+`QUALITY_LOG.md` for measured results.
 
 ## Setup
 
@@ -37,5 +41,18 @@ python -m app.main
 ## Test
 
 ```bash
-pytest
+QT_QPA_PLATFORM=offscreen pytest
 ```
+
+(`QT_QPA_PLATFORM=offscreen` is required even for non-UI tests, since
+`app/domain/commands.py` builds on Qt's `QUndoCommand`. See `RUNBOOK.md`
+for full Windows/Linux instructions and troubleshooting.)
+
+## Further reading
+
+- `PROJECT_MEMORY.md` — architecture, algorithms, requirements, defects,
+  and how to safely continue the project.
+- `RUNBOOK.md` — complete setup, run, and troubleshooting instructions.
+- `DECISIONS.md` — dated record of significant technical decisions.
+- `QUALITY_LOG.md` — measured results and visual-review findings.
+- `CHANGELOG.md` — dated summary of completed milestones.

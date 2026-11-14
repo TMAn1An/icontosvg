@@ -52,3 +52,30 @@ without confirmation.
 - No slice is complete until its exported SVG has been rendered, opened in
   a browser, and visually compared against the source crop. Report defects
   honestly rather than treating a passing test suite as sufficient.
+
+## Documentation discipline
+
+Update project documentation as part of the same change, not as a
+separate follow-up. After every meaningful milestone — a geometry
+algorithm change, a new pipeline stage, a fixed defect, a UI tab wired to
+real services, a dependency or architecture decision — update, in the
+same commit or the very next one:
+
+- **`PROJECT_MEMORY.md`** — the relevant numbered section(s); this file
+  must stay a complete, current description of purpose, requirements,
+  phase, features (working and stubbed), folder structure, architecture,
+  pipeline, algorithms, defects, and how to safely continue the project.
+- **`CHANGELOG.md`** — a dated entry (or an addition to the current
+  `[Unreleased]`/latest entry) describing what changed, in date order.
+- **`QUALITY_LOG.md`** — when the change touches geometry, reconstruction,
+  or measured quality: which icons were tested, before/after numbers,
+  visual-review findings, metric limitations encountered, remaining
+  defects, and the commit hash.
+- **`DECISIONS.md`** — when the change involved a real decision between
+  alternatives: the problem, the chosen solution, alternatives
+  considered, the reason, and the consequences/limitations, dated.
+
+Never invent completed features in documentation, and never shorten or
+delete existing useful content when updating these files — extend them.
+Clearly label anything unfinished as a stub. Do not paste entire source
+files into documentation; summarize and cite the module/file instead.

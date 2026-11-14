@@ -4,13 +4,113 @@ All notable changes to Icon Sheet Studio. Dates are ISO 8601.
 
 ## [Unreleased]
 
+### 2026-09-20 — Topology-first, confidence-gated reconstruction
+
+Replaces the per-branch curve classifier of `[0.2.0]`, which the user
+rejected as a quality regression. That version is preserved at tag
+`failed-experiment/curve-classification-v1` (commit `f2b3f64`) and was
+never merged to `main`.
+
+#### Added
+
+- `services/geometry/topology.py` — skeleton graph with Rutovitz
+  crossing-number node degree, spur pruning and degree-2 healing to a
+  joint fixed point, junction pairing by tangent continuity, and stroke
+  assembly. Strokes are reassembled whole *before* anything is fitted.
+- `services/geometry/candidates.py` — competing primitives for a whole
+  stroke (straight, corner-polyline, circle, ellipse, rounded rect,
+  polygon, arc, cubic chain, composite) plus the RDP baseline, and the
+  eight-veto safety gate `evaluate_gate`.
+- Corner preservation as a gate veto, in two parts: a distance test
+  (every detected corner within `0.6 x stroke width` of the candidate)
+  and a tangent-retention test (a candidate must keep at least half the
+  turn the pixels show at any corner of 35° or more).
+- `corner_polyline_candidate` — straight runs fitted between detected
+  corners and met at their intersections, preferred over any curve when
+  every run is straight. A zigzag is not a curve.
+- Corner-bounded pieces inside `composite_candidate`: an arc may run up
+  to a corner, never through it.
+- `tests/unit/test_topology_reconstruction.py` — 29 tests covering the
+  ten mandated regression cases.
+
+#### Fixed
+
+- **Dollar sign.** The root cause was node degree computed by clustering
+  8-adjacent neighbours, which reports the centre of a `+` as degree 1
+  and hid every crossing (`junctions: 0`). With the crossing number it
+  now emits one continuous vertical `<line>` and one continuous S as a
+  3-segment cubic path (0.89px max error), plus the coin `<circle>`, with
+  no spurious `Z`.
+- **Two dashes vanished from crop-2.** Endpoint alignment clustered both
+  ends of a dash shorter than its own tolerance and collapsed it to zero
+  length. Endpoints of the same segment are now excluded from a cluster.
+  All six dashes present in the crop now survive; `removed_degenerate`
+  is 0 across all 50 icons.
+- **Chart-arrow zigzag arrived smoothed.** Now a sharp 6-point polyline.
+- **Bar-chart tops eaten by arcs.** Corner-bounded composite pieces stop
+  an arc spanning a flat top and both its corners.
+- **Sharp triangular arrowhead (synthetic).** A 3-corner polygon at blur
+  sigma 0, 1.4 and 2.0.
+
+#### Measured
+
+50/50 crops reconstruct; 743 strokes through 605 junction pairings; 426
+`line`, 104 `polyline`, 89 `bezier`, 38 `corner-polyline`, 27 `circle`,
+23 `composite`, 18 `arc`, 17 `rounded-rect`, 1 `polygon`; 2,642 anchors;
+0 degenerate elements removed, 0 strokes needing review, 0 invalid SVG.
+Test suite 103 passed, 5 skipped.
+
+#### Known defects, not fixed
+
+crop-35's arrowhead is a blob (a regression against the pre-`0.2.0`
+output); crop-21's S is continuous but mis-shaped; crop-31's tall bar
+top is slightly domed; one crop-2 dash sits ~10° off horizontal. Full
+detail in `PROJECT_MEMORY.md` §20b and `QUALITY_LOG.md`.
+
+### 2026-09-20 — Documentation audit
+
+Documentation audit (this update): rewrote `PROJECT_MEMORY.md` against a
+27-point completeness checklist, added `DECISIONS.md`, expanded
+`RUNBOOK.md` with complete Windows PowerShell and Linux/macOS
+instructions for every operational task, added a documentation-update
+rule to `CLAUDE.md`. No code changes.
+
+## [0.2.0] — 2026-09-20
+
+Curve-versus-corner classification. Commit `f2b3f64` on branch
+`claude/happy-carson-lh8mr7`.
+
+### Added — curve-versus-corner classification
+
+- `services/geometry/curve_fit.py`: neighborhood-based corner proposal,
+  robust line fitting, circular-arc fitting with a monotone-sweep test,
+  cubic Bezier fitting with parameter refinement, and simplest-adequate
+  model selection over line/arc/cubic with the candidate errors recorded
+  for auditing.
+- `SvgPath` with structured M/L/A/C commands, so one branch mixing
+  straight, arc and cubic sections stays a single editable stroke.
+- Joint resolution: sharp corners by line intersection, smooth joints by
+  tangent matching, with the residual discontinuity measured and
+  reported rather than assumed.
+- 34 curve-classification tests: sharp triangle, rounded rectangle,
+  semicircle, S-curve, line-to-arc transition and the real dollar-sign
+  crop, each with a blurred + JPEG-recompressed variant.
+
+### Fixed
+
+- Curves no longer shredded into chords. Across the 50-icon sheet the
+  output went from 0 arcs / 0 Beziers to 257 arcs / 52 cubics, with fit
+  errors staying sub-pixel (line 0.26 mean, arc 0.67, cubic 0.75).
+- Arcs finer than the stroke, and shallow arcs standing in for bowed
+  straights, are both rejected on physical grounds.
+
 ### Planned next, in defect priority order
 
-- Arc / rounded-corner fitting in `services/geometry/curve_fit.py` —
-  rounded corners currently emit as chamfers, now the most visible
-  remaining defect.
+- Junction routing — the largest remaining source of defects; it
+  fragments the dollar sign and bends skeletons near T-junctions.
+- Corner radii below ~1.6px sagitta still chamfer (only 1 of 4 corners
+  on the credit-card frame became an arc).
 - Stroke-width estimator rework — currently overestimates ~15–25%.
-- Tighten the edge-alignment and stroke-consistency metrics.
 - Filled reconstruction mode (stub exists, interface fixed).
 
 ## [0.1.0] — 2026-09-20
